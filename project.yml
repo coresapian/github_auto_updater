@@ -28,7 +28,7 @@ targets:
         INFOPLIST_KEY_LSRequiresIPhoneOS: true
         INFOPLIST_KEY_UILaunchScreen_Generation: true
         INFOPLIST_KEY_NSAppTransportSecurity:
-          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: Access your Mac helper server on the local network to monitor updater status.
         INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers:
           - com.core.githubautoupdater.refresh

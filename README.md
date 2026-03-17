@@ -94,3 +94,10 @@ Optional push notifications from the helper:
 - Set `GITHUB_AUTO_UPDATER_NTFY_TOPIC` to send failure notifications through ntfy.
 - Set `GITHUB_AUTO_UPDATER_WEBHOOK_URL` to POST failure notifications to a webhook endpoint.
 - The iOS app can also schedule local notifications when it observes a failed updater run after refresh.
+
+## Release readiness notes
+- App Transport Security is scoped to local networking rather than arbitrary loads.
+- A privacy manifest is included at `GitHubAutoUpdaterApp/PrivacyInfo.xcprivacy`.
+- TestFlight checklist: `docs/TESTFLIGHT_CHECKLIST.md`
+- App review notes: `docs/APP_REVIEW_NOTES.md`
+- Before App Store submission, add a real App Icon set and finalize metadata/screenshots.
