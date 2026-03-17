@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
+from urllib.request import Request, urlopen
 
 HOME = Path.home()
 SCRIPT_PATH = HOME / ".local/bin/github-auto-update.sh"
@@ -36,6 +37,8 @@ MAX_ACTION_HISTORY = 8
 POLL_SECONDS = 1.0
 PAIRING_TTL_HOURS = 24
 MAX_ISSUED_TOKENS = 20
+NTFY_TOPIC_ENV = "GITHUB_AUTO_UPDATER_NTFY_TOPIC"
+WEBHOOK_URL_ENV = "GITHUB_AUTO_UPDATER_WEBHOOK_URL"
 
 RUN_STATE = {"current": None, "history": []}
 RUN_LOCK = threading.Lock()
@@ -273,6 +276,9 @@ def load_security_state() -> dict:
         "pairing_code_created_at": None,
         "pairing_code_expires_at": None,
         "issued_tokens": [],
+        "last_notification_sent_at": None,
+        "last_notification_result": None,
+        "last_notification_run_stamp": None,
     }
     if SECURITY_STATE_PATH.exists():
         try:
@@ -407,6 +413,56 @@ def pairing_status_payload(state: dict) -> dict:
     }
 
 
+
+
+def notification_status_payload(state: dict) -> dict:
+    channels = []
+    if os.getenv(NTFY_TOPIC_ENV, '').strip():
+        channels.append('ntfy')
+    if os.getenv(WEBHOOK_URL_ENV, '').strip():
+        channels.append('webhook')
+    return {
+        'configured': bool(channels),
+        'channels': channels,
+        'lastSentAt': state.get('last_notification_sent_at'),
+        'lastResult': state.get('last_notification_result'),
+        'lastRunStamp': state.get('last_notification_run_stamp'),
+    }
+
+
+def send_failure_notifications_if_needed(state: dict, summary: dict):
+    counts = summary.get('counts') or {}
+    run_stamp = summary.get('runStamp') or summary.get('summary') or ''
+    if not run_stamp or counts.get('failed', 0) <= 0:
+        return
+    if state.get('last_notification_run_stamp') == run_stamp:
+        return
+    title = 'GitHub Auto Updater Failure'
+    body = summary.get('summary') or f"{counts.get('failed', 0)} repo(s) failed in the latest updater run."
+    results = []
+    topic = os.getenv(NTFY_TOPIC_ENV, '').strip()
+    if topic:
+        try:
+            req = Request(f'https://ntfy.sh/{topic}', data=body.encode('utf-8'), headers={'Title': title})
+            with urlopen(req, timeout=10) as resp:
+                results.append(f'ntfy:{resp.status}')
+        except Exception as exc:
+            results.append(f'ntfy-error:{exc}')
+    webhook = os.getenv(WEBHOOK_URL_ENV, '').strip()
+    if webhook:
+        try:
+            payload = json.dumps({'title': title, 'body': body, 'summary': summary}).encode('utf-8')
+            req = Request(webhook, data=payload, headers={'Content-Type': 'application/json'})
+            with urlopen(req, timeout=10) as resp:
+                results.append(f'webhook:{resp.status}')
+        except Exception as exc:
+            results.append(f'webhook-error:{exc}')
+    if results:
+        state['last_notification_sent_at'] = utc_now_iso()
+        state['last_notification_result'] = '; '.join(results)
+        state['last_notification_run_stamp'] = run_stamp
+        save_security_state(state)
+
 def get_run_state_snapshot() -> dict:
     with RUN_LOCK:
         current = clone_action(RUN_STATE["current"])
@@ -501,6 +557,7 @@ def run_updater_in_background(action: dict, repo_targets: list[dict], baseline: 
             finished["progress"] = progress
             finished["latestSummary"] = summary
             finished["statusMessage"] = summary.get("summary") or ("Updater completed successfully." if exit_code == 0 else "Updater failed.")
+            send_failure_notifications_if_needed(SECURITY_STATE, summary)
             finalize_current_action(action_id, finished)
         except Exception as exc:
             failed = clone_action(get_run_state_snapshot()["current"] or action) or action
@@ -535,6 +592,7 @@ def status_payload() -> dict:
         "helperTime": utc_now_iso(),
         "dashboard": build_dashboard_summary(repos, backups),
         "pairing": pairing_status_payload(SECURITY_STATE),
+        "notifications": notification_status_payload(SECURITY_STATE),
     }
 
 
@@ -728,4 +786,6 @@ if __name__ == "__main__":
     print(f"Manual updater endpoint: POST http://127.0.0.1:{PORT}/run-updater")
     print(f"Optional read token env var: {READ_TOKEN_ENV}")
     print(f"Optional manual-run token env var: {RUN_TOKEN_ENV}")
+    print(f"Optional ntfy topic env var: {NTFY_TOPIC_ENV}")
+    print(f"Optional webhook env var: {WEBHOOK_URL_ENV}")
     server.serve_forever()

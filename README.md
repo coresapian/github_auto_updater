@@ -89,3 +89,8 @@ iOS UI notes:
 Notes:
 - This is a real iOS app scaffold, not a Tkinter wrapper.
 - Finder-opening and crontab-editing remain Mac-only operations, so those stay on the Mac helper side rather than the iPhone UI.
+
+Optional push notifications from the helper:
+- Set `GITHUB_AUTO_UPDATER_NTFY_TOPIC` to send failure notifications through ntfy.
+- Set `GITHUB_AUTO_UPDATER_WEBHOOK_URL` to POST failure notifications to a webhook endpoint.
+- The iOS app can also schedule local notifications when it observes a failed updater run after refresh.

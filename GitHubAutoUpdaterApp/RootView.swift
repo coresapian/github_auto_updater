@@ -65,6 +65,7 @@ struct DashboardView: View {
 
                     updaterCard
                     pairingCard
+                    notificationsCard
                     manualRunCard
                     repoSection
 
@@ -137,6 +138,24 @@ struct DashboardView: View {
                 Text(viewModel.pairingStatus.pairingInstructions)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+
+    private var notificationsCard: some View {
+        DashboardCard(title: "Notifications", systemImage: "bell.badge.fill") {
+            VStack(alignment: .leading, spacing: 10) {
+                StatusRow(label: "Local notifications", value: viewModel.notificationsEnabled ? "Enabled" : "Disabled")
+                StatusRow(label: "Helper push hooks", value: viewModel.status.notifications.configured ? viewModel.status.notifications.channels.joined(separator: ", ") : "Not configured")
+                if let sentAt = viewModel.status.notifications.lastSentAt, !sentAt.isEmpty {
+                    StatusRow(label: "Last helper notification", value: viewModel.formattedTimestamp(sentAt))
+                }
+                if let result = viewModel.status.notifications.lastResult, !result.isEmpty {
+                    Text(result)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -423,6 +442,27 @@ struct SettingsView: View {
                         Button("Clear saved token", role: .destructive) {
                             viewModel.clearHelperToken()
                         }
+                    }
+                }
+
+                Section("Notifications") {
+                    Toggle("Local failure notifications", isOn: $viewModel.notificationsEnabled)
+                    Button("Request notification permission") {
+                        Task { await viewModel.requestNotificationPermission() }
+                    }
+                    if let message = viewModel.notificationMessage, !message.isEmpty {
+                        Text(message)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    if viewModel.status.notifications.configured {
+                        Text("Helper push channels: \(viewModel.status.notifications.channels.joined(separator: ", "))")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("No helper push channels configured yet. Set helper env vars to enable ntfy or webhook delivery.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
                 }
 

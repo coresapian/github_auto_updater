@@ -175,6 +175,22 @@ struct PairingExchangeResponse: Codable, Hashable {
     let pairingCodeExpiresAt: String?
 }
 
+struct NotificationStatus: Codable, Hashable {
+    let configured: Bool
+    let channels: [String]
+    let lastSentAt: String?
+    let lastResult: String?
+    let lastRunStamp: String?
+
+    static let placeholder = NotificationStatus(
+        configured: false,
+        channels: [],
+        lastSentAt: nil,
+        lastResult: nil,
+        lastRunStamp: nil
+    )
+}
+
 struct StatusResponse: Codable {
     let cronInstalled: Bool
     let cronEntry: String
@@ -190,6 +206,7 @@ struct StatusResponse: Codable {
     let helperTime: Date?
     let dashboard: DashboardSummary
     let pairing: PairingStatus
+    let notifications: NotificationStatus
 
     static let placeholder = StatusResponse(
         cronInstalled: false,
@@ -205,7 +222,8 @@ struct StatusResponse: Codable {
         manualRun: .empty,
         helperTime: nil,
         dashboard: .placeholder,
-        pairing: .placeholder
+        pairing: .placeholder,
+        notifications: .placeholder
     )
 }
 

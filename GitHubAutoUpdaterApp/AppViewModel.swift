@@ -3,6 +3,7 @@ import Foundation
 import Security
 import SwiftUI
 import UIKit
+import UserNotifications
 
 private enum HelperTokenKeychain {
     private static let service = "com.core.githubautoupdater"
@@ -58,6 +59,8 @@ final class AppViewModel: ObservableObject {
     @AppStorage("backgroundRefreshEnabled") var backgroundRefreshEnabled: Bool = true
     @AppStorage("pairingCode") var pairingCode: String = ""
     @AppStorage("deviceName") var deviceName: String = UIDevice.current.name
+    @AppStorage("notificationsEnabled") var notificationsEnabled: Bool = false
+    @AppStorage("lastNotifiedRunStamp") var lastNotifiedRunStamp: String = ""
 
     @Published var helperToken: String {
         didSet {
@@ -81,6 +84,7 @@ final class AppViewModel: ObservableObject {
     @Published var isPairing: Bool = false
     @Published var manualRunMessage: String?
     @Published var pairingMessage: String?
+    @Published var notificationMessage: String?
     @Published var lastRefreshDate: Date?
     @Published var nextAutomaticRefreshDate: Date?
     @Published var selectedLogSource: LogSource = .main
@@ -208,6 +212,7 @@ final class AppViewModel: ObservableObject {
             let status = try await api.fetchStatus(baseURL: serverURL, authToken: helperToken)
             self.status = status
             self.pairingStatus = status.pairing
+            await maybeScheduleFailureNotification(from: status)
             if selectedRepo == nil {
                 selectedRepo = status.repos.first
             } else if let selectedRepo {
@@ -274,6 +279,34 @@ final class AppViewModel: ObservableObject {
         pairingMessage = nil
     }
 
+    func requestNotificationPermission() async {
+        do {
+            let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
+            notificationsEnabled = granted
+            notificationMessage = granted ? "Notifications enabled." : "Notification permission was not granted."
+        } catch {
+            notificationMessage = error.localizedDescription
+        }
+    }
+
+    func maybeScheduleFailureNotification(from status: StatusResponse) async {
+        guard notificationsEnabled else { return }
+        guard let counts = status.latestSummary.counts, counts.failed > 0 else { return }
+        let runStamp = status.latestSummary.runStamp ?? status.latestSummary.summary ?? ""
+        guard !runStamp.isEmpty, runStamp != lastNotifiedRunStamp else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "GitHub Auto Updater Failure"
+        content.body = status.latestSummary.summary ?? "One or more repos failed during the last updater run."
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: "github-auto-updater-failure-\(runStamp)", content: content, trigger: nil)
+        do {
+            try await UNUserNotificationCenter.current().add(request)
+            lastNotifiedRunStamp = runStamp
+        } catch {
+            notificationMessage = error.localizedDescription
+        }
+    }
+
     func triggerManualRun() async {
         guard !isTriggeringManualRun else { return }
         isTriggeringManualRun = true
@@ -295,7 +328,8 @@ final class AppViewModel: ObservableObject {
                     manualRun: manualRun,
                     helperTime: status.helperTime,
                     dashboard: status.dashboard,
-                    pairing: pairingStatus
+                    pairing: pairingStatus,
+                    notifications: status.notifications
                 )
             }
             manualRunMessage = response.manualRun?.latest?.statusMessage ?? "Manual updater run requested."
