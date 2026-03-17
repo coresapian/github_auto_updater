@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  helper-python:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validate helper syntax
+        run: python -m py_compile helper/status_server.py
+
+  xcodegen-and-build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        run: xcodegen generate
+      - name: Build iOS app for simulator
+        run: |
+          xcodebuild             -project GitHubAutoUpdaterApp.xcodeproj             -scheme GitHubAutoUpdaterApp             -sdk iphonesimulator             -configuration Debug             build CODE_SIGNING_ALLOWED=NO
+
+  archive-dry-run:
+    runs-on: macos-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Dry run archive script env validation
+        env:
+          DEVELOPMENT_TEAM: DUMMYTEAMID
+          APP_BUNDLE_ID: com.example.githubautoupdater
+        run: |
+          bash -n scripts/archive_testflight.sh
