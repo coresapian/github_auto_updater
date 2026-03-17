@@ -2,12 +2,13 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var viewModel: AppViewModel
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         TabView {
             DashboardView()
                 .tabItem {
-                    Label("Dashboard", systemImage: "gauge.with.dots.needle.50percent")
+                    Label("Dashboard", systemImage: "rectangle.grid.2x2.fill")
                 }
             LogsView()
                 .tabItem {
@@ -18,13 +19,24 @@ struct RootView: View {
                     Label("Settings", systemImage: "gearshape")
                 }
         }
+        .task {
+            viewModel.start()
+            await viewModel.refresh(reason: .manual)
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            viewModel.handleScenePhase(newPhase)
+        }
+        .onChange(of: viewModel.refreshInterval) { _, _ in
+            viewModel.restartAutoRefreshLoop()
+        }
+        .onChange(of: viewModel.autoRefreshWhileOpen) { _, _ in
+            viewModel.restartAutoRefreshLoop()
+        }
         .overlay(alignment: .top) {
             if let error = viewModel.errorMessage, !error.isEmpty {
-                Text(error)
-                    .font(.footnote)
-                    .padding(8)
-                    .frame(maxWidth: .infinity)
-                    .background(.red.opacity(0.15))
+                ErrorBanner(error: error)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
             }
         }
     }
@@ -33,135 +45,163 @@ struct RootView: View {
 struct DashboardView: View {
     @EnvironmentObject private var viewModel: AppViewModel
 
+    private let columns = [
+        GridItem(.flexible(), spacing: 12),
+        GridItem(.flexible(), spacing: 12)
+    ]
+
     var body: some View {
         NavigationStack {
-            List {
-                Section("Updater") {
-                    LabeledContent("Cron installed", value: viewModel.status.cronInstalled ? "Yes" : "No")
-                    LabeledContent("Cron entry", value: viewModel.status.cronEntry)
-                    LabeledContent("Script", value: viewModel.status.scriptPath)
-                    if let summary = viewModel.status.latestSummary.summary, !summary.isEmpty {
-                        LabeledContent("Last summary", value: summary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    ConnectionStatusCard()
+
+                    LazyVGrid(columns: columns, spacing: 12) {
+                        MetricCard(title: "Healthy", value: "\(viewModel.status.dashboard.healthyRepos)", subtitle: "repos")
+                        MetricCard(title: "Attention", value: "\(viewModel.status.dashboard.attentionRepos)", subtitle: "warning / failed")
+                        MetricCard(title: "Backups", value: "\(viewModel.status.dashboard.backupsCount)", subtitle: "directories")
+                        MetricCard(title: "Alerts", value: viewModel.status.dashboard.alertLogPresent ? "Present" : "Clear", subtitle: "alert log")
                     }
-                    if let counts = viewModel.status.latestSummary.counts {
-                        LabeledContent("Last counts", value: counts.compactDescription)
+
+                    updaterCard
+                    manualRunCard
+                    repoSection
+
+                    if !viewModel.status.backups.isEmpty {
+                        backupsCard
                     }
                 }
-
-                ManualRunSection()
-
-                Section("Repositories") {
-                    ForEach(viewModel.status.repos) { repo in
-                        Button {
-                            viewModel.selectRepo(repo)
-                        } label: {
-                            HStack {
-                                Circle()
-                                    .fill(color(for: repo.state))
-                                    .frame(width: 12, height: 12)
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(repo.repo)
-                                        .font(.headline)
-                                    Text(repo.summary)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .multilineTextAlignment(.leading)
-                                }
-                                Spacer()
-                                Text(repo.state.label)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-
-                if !viewModel.status.backups.isEmpty {
-                    Section("Backups") {
-                        ForEach(viewModel.status.backups, id: \.self) { backup in
-                            Text(backup)
-                                .font(.caption)
-                        }
-                    }
-                }
+                .padding()
             }
             .navigationTitle("GitHub Auto Updater")
+            .refreshable {
+                await viewModel.refresh(reason: .manual)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Refresh") {
-                        Task { await viewModel.refresh() }
+                    Button {
+                        Task { await viewModel.refresh(reason: .manual) }
+                    } label: {
+                        if viewModel.isLoading {
+                            ProgressView()
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
                     }
                 }
             }
         }
     }
 
-    private func color(for state: RepoHealth) -> Color {
-        switch state {
-        case .ok:
-            return .green
-        case .skipped, .warning:
-            return .yellow
-        case .failed:
-            return .red
-        case .unknown:
-            return .gray
-        }
-    }
-}
-
-struct ManualRunSection: View {
-    @EnvironmentObject private var viewModel: AppViewModel
-
-    var body: some View {
-        Section("Manual run") {
-            Button {
-                Task { await viewModel.triggerManualRun() }
-            } label: {
-                HStack {
-                    if viewModel.isTriggeringManualRun {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    Text(viewModel.isTriggeringManualRun ? "Requesting…" : "Run updater now")
+    private var updaterCard: some View {
+        DashboardCard(title: "Updater status", systemImage: "bolt.badge.clock") {
+            VStack(alignment: .leading, spacing: 10) {
+                StatusRow(label: "Cron installed", value: viewModel.status.cronInstalled ? "Yes" : "No")
+                StatusRow(label: "Refresh cadence", value: everyLabel(seconds: Int(viewModel.refreshInterval)))
+                StatusRow(label: "Script", value: viewModel.status.scriptPath.isEmpty ? "Unknown" : viewModel.status.scriptPath)
+                if let summary = viewModel.status.latestSummary.summary, !summary.isEmpty {
+                    StatusRow(label: "Last summary", value: summary)
+                }
+                if let counts = viewModel.status.latestSummary.counts {
+                    StatusRow(label: "Last counts", value: counts.compactDescription)
+                }
+                StatusRow(label: "Helper time", value: viewModel.formattedDate(viewModel.status.helperTime))
+                if !viewModel.status.crontab.isEmpty {
+                    Divider()
+                    Text("Crontab preview")
+                        .font(.subheadline.weight(.semibold))
+                    Text(viewModel.status.crontab)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .disabled(viewModel.isTriggeringManualRun || viewModel.status.manualRun.current != nil)
+        }
+    }
 
-            if let action = viewModel.status.manualRun.current ?? viewModel.status.manualRun.latest {
-                ManualRunActionCard(title: viewModel.status.manualRun.current == nil ? "Most recent action" : "Current action", action: action)
-            }
+    private var manualRunCard: some View {
+        DashboardCard(title: "Manual run", systemImage: "play.circle.fill") {
+            VStack(alignment: .leading, spacing: 10) {
+                Button {
+                    Task { await viewModel.triggerManualRun() }
+                } label: {
+                    HStack {
+                        if viewModel.isTriggeringManualRun {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(viewModel.isTriggeringManualRun ? "Requesting…" : "Run updater now")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.isTriggeringManualRun || viewModel.status.manualRun.current != nil)
 
-            if let info = viewModel.manualRunMessage, !info.isEmpty {
-                Text(info)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
+                if let action = viewModel.status.manualRun.current ?? viewModel.status.manualRun.latest {
+                    ManualRunActionCard(action: action)
+                }
 
-            if !viewModel.status.manualRun.history.isEmpty {
-                ForEach(viewModel.status.manualRun.history.prefix(3)) { action in
-                    VStack(alignment: .leading, spacing: 4) {
+                if !viewModel.status.manualRun.history.isEmpty {
+                    ForEach(viewModel.status.manualRun.history.prefix(3)) { action in
                         HStack {
                             Text(action.stateLabel)
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(color(for: action))
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(color(for: action.state))
                             Spacer()
                             Text(viewModel.formattedTimestamp(action.requestedAt))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        Text(action.statusMessage)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let info = viewModel.manualRunMessage, !info.isEmpty {
+                    Text(info)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var repoSection: some View {
+        DashboardCard(title: "Repositories", systemImage: "shippingbox.fill") {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("Repo filter", selection: $viewModel.dashboardRepoFilter) {
+                    ForEach(AppViewModel.DashboardRepoFilter.allCases) { filter in
+                        Text(filter.title).tag(filter)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                if viewModel.filteredRepos.isEmpty {
+                    ContentUnavailableView("No repositories", systemImage: "shippingbox")
+                } else {
+                    ForEach(viewModel.filteredRepos) { repo in
+                        RepoCard(repo: repo) {
+                            viewModel.selectRepo(repo)
+                        }
                     }
                 }
             }
         }
     }
 
-    private func color(for action: ManualRunAction) -> Color {
-        switch action.state {
+    private var backupsCard: some View {
+        DashboardCard(title: "Backups", systemImage: "externaldrive.fill.badge.clock") {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(viewModel.status.backups, id: \.self) { backup in
+                    Text(backup)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    private func color(for state: String) -> Color {
+        switch state {
         case "queued": return .orange
         case "running": return .blue
         case "succeeded": return .green
@@ -169,17 +209,315 @@ struct ManualRunSection: View {
         default: return .gray
         }
     }
+
+    private func everyLabel(seconds: Int) -> String {
+        if seconds < 60 { return "Every \(seconds)s" }
+        return "Every \(seconds / 60)m"
+    }
+}
+
+struct LogsView: View {
+    @EnvironmentObject private var viewModel: AppViewModel
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Picker("Source", selection: Binding(
+                        get: { viewModel.selectedLogSource },
+                        set: { viewModel.selectLogSource($0) }
+                    )) {
+                        ForEach(LogSource.allCases) { source in
+                            Text(source.title).tag(source)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    if viewModel.selectedLogSource == .repo {
+                        Picker("Repository", selection: Binding(
+                            get: { viewModel.selectedRepo?.id ?? "" },
+                            set: { id in
+                                guard let repo = viewModel.status.repos.first(where: { $0.id == id }) else { return }
+                                viewModel.selectRepo(repo)
+                            }
+                        )) {
+                            ForEach(viewModel.status.repos) { repo in
+                                Text(repo.repo).tag(repo.id)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                    }
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                        TextField("Search current log", text: $viewModel.logSearchText)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        if !viewModel.logSearchText.isEmpty {
+                            Button {
+                                viewModel.logSearchText = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    Picker("Severity", selection: $viewModel.logSeverityFilter) {
+                        ForEach(LogSeverityFilter.allCases) { severity in
+                            Text(severity.title).tag(severity)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    HStack {
+                        Label(viewModel.activeLogTitle, systemImage: "doc.text")
+                        Spacer()
+                        Text("\(viewModel.filteredLogLines.count)/\(viewModel.currentLogLines.count) lines")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if viewModel.filteredLogLines.isEmpty {
+                    Section {
+                        ContentUnavailableView("No matching lines", systemImage: "line.3.horizontal.decrease.circle")
+                            .frame(maxWidth: .infinity)
+                            .listRowBackground(Color.clear)
+                    }
+                } else {
+                    Section {
+                        ForEach(viewModel.filteredLogLines) { line in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: icon(for: line.severity))
+                                        .foregroundStyle(color(for: line.severity))
+                                    Text("Line \(line.index + 1)")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                }
+                                Text(line.text)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Logs")
+            .refreshable {
+                await viewModel.refresh(reason: .manual)
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Refresh") {
+                        Task { await viewModel.refresh(reason: .manual) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func icon(for severity: LogSeverityFilter) -> String {
+        switch severity {
+        case .error: return "xmark.octagon.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        case .matched: return "scope"
+        default: return "info.circle.fill"
+        }
+    }
+
+    private func color(for severity: LogSeverityFilter) -> Color {
+        switch severity {
+        case .error: return .red
+        case .warning: return .yellow
+        case .matched: return .blue
+        default: return .secondary
+        }
+    }
+}
+
+struct SettingsView: View {
+    @EnvironmentObject private var viewModel: AppViewModel
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Connection") {
+                    TextField("Mac helper URL", text: $viewModel.serverURL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Helper token / bearer token", text: $viewModel.helperToken)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Stepper(value: $viewModel.refreshInterval, in: 10 ... 300, step: 5) {
+                        Text("Refresh interval: \(Int(viewModel.refreshInterval))s")
+                    }
+                    Toggle("Auto refresh while open", isOn: $viewModel.autoRefreshWhileOpen)
+                    Toggle("Background refresh", isOn: $viewModel.backgroundRefreshEnabled)
+                }
+
+                Section("Manual run notes") {
+                    Text("Manual runs use POST /run-updater. If the helper is configured with an auth token, enter the same token here. The app stores the token in Keychain.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("App behavior") {
+                    Text("The app now supports foreground auto-refresh, background refresh scheduling, log filtering/search, and richer dashboard cards. Finder/crontab actions remain Mac-side.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section {
+                    Button("Refresh now") {
+                        Task { await viewModel.refresh(reason: .manual) }
+                    }
+                }
+            }
+            .navigationTitle("Settings")
+        }
+    }
+}
+
+struct ErrorBanner: View {
+    let error: String
+
+    var body: some View {
+        Text(error)
+            .font(.footnote)
+            .padding(8)
+            .frame(maxWidth: .infinity)
+            .background(.red.opacity(0.15))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct ConnectionStatusCard: View {
+    @EnvironmentObject private var viewModel: AppViewModel
+
+    var body: some View {
+        DashboardCard(title: "Connection", systemImage: "dot.radiowaves.left.and.right") {
+            VStack(alignment: .leading, spacing: 8) {
+                StatusRow(label: "Server", value: viewModel.serverURL)
+                StatusRow(label: "Last refresh", value: viewModel.formattedDate(viewModel.lastRefreshDate))
+                StatusRow(label: "Next auto refresh", value: viewModel.formattedDate(viewModel.nextAutomaticRefreshDate))
+                StatusRow(label: "Helper token", value: viewModel.helperToken.isEmpty ? "Not configured" : "Configured")
+            }
+        }
+    }
+}
+
+struct MetricCard: View {
+    let title: String
+    let value: String
+    let subtitle: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.title.bold())
+            Text(subtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+struct DashboardCard<Content: View>: View {
+    let title: String
+    let systemImage: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18))
+    }
+}
+
+struct StatusRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value.isEmpty ? "—" : value)
+                .font(.subheadline)
+        }
+    }
+}
+
+struct RepoCard: View {
+    let repo: RepoStatus
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: repo.state.systemImage)
+                    .foregroundStyle(color)
+                    .font(.title3)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text(repo.repo)
+                            .font(.headline)
+                        Spacer()
+                        Text(repo.state.label)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(repo.summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if let updatedAt = repo.updatedAt {
+                        Text(updatedAt.formatted(date: .abbreviated, time: .shortened))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(12)
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var color: Color {
+        switch repo.state {
+        case .ok: return .green
+        case .skipped, .warning: return .yellow
+        case .failed: return .red
+        case .unknown: return .gray
+        }
+    }
 }
 
 struct ManualRunActionCard: View {
     @EnvironmentObject private var viewModel: AppViewModel
-    let title: String
     let action: ManualRunAction
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
             HStack {
                 Text(action.stateLabel)
                     .font(.headline)
@@ -198,15 +536,14 @@ struct ManualRunActionCard: View {
                     .foregroundStyle(.secondary)
             }
             if let repo = action.progress.lastTouchedRepo {
-                LabeledContent("Last repo", value: repo)
-                    .font(.caption)
+                StatusRow(label: "Last repo", value: repo)
             }
-            LabeledContent("Requested", value: viewModel.formattedTimestamp(action.requestedAt))
+            StatusRow(label: "Requested", value: viewModel.formattedTimestamp(action.requestedAt))
             if let startedAt = action.startedAt {
-                LabeledContent("Started", value: viewModel.formattedTimestamp(startedAt))
+                StatusRow(label: "Started", value: viewModel.formattedTimestamp(startedAt))
             }
             if let finishedAt = action.finishedAt {
-                LabeledContent("Finished", value: viewModel.formattedTimestamp(finishedAt))
+                StatusRow(label: "Finished", value: viewModel.formattedTimestamp(finishedAt))
             }
             Text(action.statusMessage)
                 .font(.caption)
@@ -226,113 +563,6 @@ struct ManualRunActionCard: View {
         case "succeeded": return .green
         case "failed": return .red
         default: return .gray
-        }
-    }
-}
-
-struct LogsView: View {
-    @EnvironmentObject private var viewModel: AppViewModel
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 12) {
-                Picker("Log", selection: Binding(
-                    get: { viewModel.selectedRepo?.repo ?? "main" },
-                    set: { newValue in
-                        if newValue == "main" {
-                            viewModel.selectedRepo = nil
-                            viewModel.repoLogText = "Select a repo log below."
-                        } else if newValue == "alert" {
-                            viewModel.selectedRepo = nil
-                        } else if let repo = viewModel.status.repos.first(where: { $0.repo == newValue }) {
-                            viewModel.selectRepo(repo)
-                        }
-                    }
-                )) {
-                    Text("main").tag("main")
-                    Text("alert").tag("alert")
-                    ForEach(viewModel.status.repos) { repo in
-                        Text(repo.repo).tag(repo.repo)
-                    }
-                }
-                .pickerStyle(.menu)
-                .padding(.horizontal)
-
-                TabView {
-                    ScrollView {
-                        Text(viewModel.mainLogText)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .font(.system(.caption, design: .monospaced))
-                            .padding()
-                    }
-                    .tabItem { Text("Main") }
-
-                    ScrollView {
-                        Text(viewModel.alertLogText)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .font(.system(.caption, design: .monospaced))
-                            .padding()
-                    }
-                    .tabItem { Text("Alert") }
-
-                    ScrollView {
-                        Text(viewModel.repoLogText)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .font(.system(.caption, design: .monospaced))
-                            .padding()
-                    }
-                    .tabItem { Text("Repo") }
-                }
-            }
-            .navigationTitle("Logs")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Refresh") {
-                        Task { await viewModel.refresh() }
-                    }
-                }
-            }
-        }
-    }
-}
-
-struct SettingsView: View {
-    @EnvironmentObject private var viewModel: AppViewModel
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Connection") {
-                    TextField("Mac helper URL", text: $viewModel.serverURL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    TextField("POST token (optional for localhost)", text: $viewModel.helperToken)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    Stepper(value: $viewModel.refreshInterval, in: 10 ... 300, step: 5) {
-                        Text("Refresh interval: \(Int(viewModel.refreshInterval))s")
-                    }
-                }
-
-                Section("Manual run notes") {
-                    Text("Manual runs use POST /run-updater. Loopback requests work without a token, but LAN-triggered runs require the helper to be started with GITHUB_AUTO_UPDATER_HELPER_TOKEN and this same token entered here.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Mac-side capabilities") {
-                    Text("The iOS app can now request a manual updater run through the helper server. Cron editing and Finder actions remain Mac-side operations.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section {
-                    Button("Refresh now") {
-                        Task { await viewModel.refresh() }
-                    }
-                }
-            }
-            .navigationTitle("Settings")
         }
     }
 }

@@ -23,19 +23,24 @@ GITHUB_DIR = HOME / "Documents/GitHub"
 CRON_ENTRY = f"*/30 * * * * {SCRIPT_PATH}"
 PORT = 8787
 RUN_TOKEN_ENV = "GITHUB_AUTO_UPDATER_HELPER_TOKEN"
+READ_TOKEN_ENV = "GITHUB_AUTO_UPDATER_AUTH_TOKEN"
 RUN_HEADER = "X-Updater-Token"
+AUTH_HEADER = "Authorization"
 MAX_ACTION_HISTORY = 8
 POLL_SECONDS = 1.0
 
-RUN_STATE = {
-    "current": None,
-    "history": [],
-}
+RUN_STATE = {"current": None, "history": []}
 RUN_LOCK = threading.Lock()
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def isoformat_timestamp(ts: float | None) -> str | None:
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def read_text(path: Path, tail_lines: int = 300) -> str:
@@ -77,28 +82,48 @@ def list_backups() -> list[str]:
     return sorted(paths, key=str.lower)
 
 
+def file_timestamp(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        return isoformat_timestamp(path.stat().st_mtime)
+    except OSError:
+        return None
+
+
 def latest_repo_status(repo_log: Path) -> dict:
     text = read_text(repo_log, tail_lines=200)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     state = "unknown"
     summary = "No recent status"
     for line in reversed(lines):
+        lower = line.lower()
         if line.startswith("ok: "):
             state = "ok"
             summary = line
             break
         if line.startswith("skip: "):
             summary = line
-            lower = line.lower()
             if "working tree has local changes" in lower:
                 state = "skipped"
-            elif "not a git repository" in lower:
+            elif "not a git repository" in lower or "missing" in lower:
                 state = "warning"
             else:
                 state = "failed"
             break
+        if "error" in lower or "failed" in lower or "fatal" in lower:
+            state = "failed"
+            summary = line
+            break
     repo_name = repo_log.name.rsplit(".log", 1)[0]
-    return {"id": repo_name, "repo": repo_name, "state": state, "summary": summary}
+    return {
+        "id": repo_name,
+        "repo": repo_name,
+        "state": state,
+        "summary": summary,
+        "updatedAt": file_timestamp(repo_log),
+        "logPath": str(repo_log),
+    }
 
 
 def repo_logs() -> list[Path]:
@@ -111,11 +136,7 @@ def parse_summary_counts(line: str) -> dict | None:
     match = re.search(r"summary:\s*ok=(\d+)\s+skipped=(\d+)\s+failed=(\d+)", line)
     if not match:
         return None
-    return {
-        "ok": int(match.group(1)),
-        "skipped": int(match.group(2)),
-        "failed": int(match.group(3)),
-    }
+    return {"ok": int(match.group(1)), "skipped": int(match.group(2)), "failed": int(match.group(3))}
 
 
 def latest_main_summary() -> dict:
@@ -131,10 +152,28 @@ def latest_main_summary() -> dict:
             stamp = line.strip("= ")
             break
     counts = parse_summary_counts(summary_line or "")
+    return {"runStamp": stamp, "summary": summary_line, "counts": counts}
+
+
+def build_dashboard_summary(repos: list[dict], backups: list[str]) -> dict:
+    counts = {"ok": 0, "skipped": 0, "failed": 0, "warning": 0, "unknown": 0}
+    latest_updates = []
+    for repo in repos:
+        counts[repo["state"]] = counts.get(repo["state"], 0) + 1
+        if repo.get("updatedAt"):
+            latest_updates.append(repo["updatedAt"])
+    alert_log_present = ALERT_LOG.exists() and ALERT_LOG.stat().st_size > 0 if ALERT_LOG.exists() else False
     return {
-        "runStamp": stamp,
-        "summary": summary_line,
-        "counts": counts,
+        "totalRepos": len(repos),
+        "healthyRepos": counts.get("ok", 0),
+        "attentionRepos": counts.get("failed", 0) + counts.get("warning", 0) + counts.get("skipped", 0),
+        "failedRepos": counts.get("failed", 0),
+        "warningRepos": counts.get("warning", 0),
+        "skippedRepos": counts.get("skipped", 0),
+        "unknownRepos": counts.get("unknown", 0),
+        "backupsCount": len(backups),
+        "alertLogPresent": alert_log_present,
+        "latestRepoUpdate": max(latest_updates) if latest_updates else None,
     }
 
 
@@ -189,16 +228,14 @@ def compute_progress(repo_targets: list[dict], baseline: dict[str, dict], starte
                 last_touched_repo = target["repo"]
     total = len(repo_targets)
     completed = len(touched)
-    percent = 0
-    if total > 0:
-        percent = int(round((completed / total) * 100))
+    percent = int(round((completed / total) * 100)) if total > 0 else 0
     return {
         "totalRepos": total,
         "completedRepos": completed,
         "percent": percent,
         "touchedRepos": touched,
         "lastTouchedRepo": last_touched_repo,
-        "lastTouchedAt": datetime.fromtimestamp(last_touched_at, tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z") if last_touched_at else None,
+        "lastTouchedAt": isoformat_timestamp(last_touched_at),
     }
 
 
@@ -215,7 +252,7 @@ def get_run_state_snapshot() -> dict:
         "current": current,
         "latest": latest,
         "history": history,
-        "tokenConfigured": bool(os.environ.get(RUN_TOKEN_ENV, "").strip()),
+        "tokenConfigured": bool(os.environ.get(RUN_TOKEN_ENV, "").strip() or os.environ.get(READ_TOKEN_ENV, "").strip()),
         "postEndpoint": "/run-updater",
         "authHeader": RUN_HEADER,
     }
@@ -317,6 +354,8 @@ def run_updater_in_background(action: dict, repo_targets: list[dict], baseline: 
 
 def status_payload() -> dict:
     crontab = get_crontab()
+    repos = [latest_repo_status(path) for path in repo_logs()]
+    backups = list_backups()
     return {
         "cronInstalled": CRON_ENTRY in crontab,
         "cronEntry": CRON_ENTRY,
@@ -324,16 +363,18 @@ def status_payload() -> dict:
         "mainLog": str(MAIN_LOG),
         "alertLog": str(ALERT_LOG),
         "repoLogDir": str(REPO_LOG_DIR),
-        "backups": list_backups(),
-        "repos": [latest_repo_status(path) for path in repo_logs()],
+        "backups": backups,
+        "repos": repos,
         "crontab": crontab,
         "latestSummary": latest_main_summary(),
         "manualRun": get_run_state_snapshot(),
+        "helperTime": utc_now_iso(),
+        "dashboard": build_dashboard_summary(repos, backups),
     }
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "GitHubAutoUpdaterHelper/0.2"
+    server_version = "GitHubAutoUpdaterHelper/0.3"
 
     def _send(self, payload: dict, status: int = 200):
         body = json.dumps(payload).encode("utf-8")
@@ -341,7 +382,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", f"Content-Type, {RUN_HEADER}")
+        self.send_header("Access-Control-Allow-Headers", f"Content-Type, {RUN_HEADER}, {AUTH_HEADER}")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
         self.wfile.write(body)
@@ -372,15 +413,37 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             raise ValueError("Request body must be valid JSON.")
 
+    def _extract_token(self, body: dict | None = None) -> str:
+        body = body or {}
+        auth = self.headers.get(AUTH_HEADER, "")
+        if auth.lower().startswith("bearer "):
+            return auth.split(" ", 1)[1].strip()
+        return (self.headers.get(RUN_HEADER, "") or body.get("token", "") or "").strip()
+
+    def _authorize_read(self, body: dict | None = None) -> tuple[bool, str]:
+        configured = os.environ.get(READ_TOKEN_ENV, "").strip()
+        if not configured:
+            return True, ""
+        supplied = self._extract_token(body)
+        if supplied != configured:
+            return False, f"Missing or invalid bearer token for {READ_TOKEN_ENV}."
+        return True, ""
+
     def _authorize_manual_post(self, body: dict) -> tuple[bool, str]:
+        allowed, message = self._authorize_read(body)
+        if not allowed:
+            return allowed, message
         if not self._is_private_or_loopback():
             return False, "Manual updater POST is only allowed from loopback or private-network clients."
         configured_token = os.environ.get(RUN_TOKEN_ENV, "").strip()
-        supplied_token = (self.headers.get(RUN_HEADER, "") or body.get("token", "") or "").strip()
+        supplied_token = self._extract_token(body)
         if configured_token and supplied_token != configured_token:
             return False, f"Missing or invalid {RUN_HEADER}."
-        if not configured_token and not ipaddress.ip_address(self._client_ip()).is_loopback:
-            return False, f"Set {RUN_TOKEN_ENV} before allowing LAN-triggered manual runs."
+        try:
+            if not configured_token and not ipaddress.ip_address(self._client_ip()).is_loopback:
+                return False, f"Set {RUN_TOKEN_ENV} before allowing LAN-triggered manual runs."
+        except ValueError:
+            return False, "Unable to validate client IP."
         return True, ""
 
     def do_OPTIONS(self):
@@ -388,20 +451,24 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.rstrip("/") or "/"
+        allowed, message = self._authorize_read()
+        if not allowed:
+            self._send({"error": message}, status=401)
+            return
         if path == "/status":
             self._send(status_payload())
             return
         if path == "/log/main":
-            self._send({"name": "main", "content": read_text(MAIN_LOG, 300)})
+            self._send({"name": "main", "content": read_text(MAIN_LOG, 400)})
             return
         if path == "/log/alert":
-            self._send({"name": "alert", "content": read_text(ALERT_LOG, 200)})
+            self._send({"name": "alert", "content": read_text(ALERT_LOG, 300)})
             return
         if path.startswith("/log/repo/"):
             name = unquote(path.split("/log/repo/", 1)[1])
             safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
             file_path = REPO_LOG_DIR / f"{safe}.log"
-            self._send({"name": name, "content": read_text(file_path, 200)})
+            self._send({"name": name, "content": read_text(file_path, 300)})
             return
         self._send({"error": "not found"}, status=404)
 
@@ -449,14 +516,7 @@ class Handler(BaseHTTPRequestHandler):
             if RUN_STATE["current"]:
                 already_running = {
                     "error": "Updater run already in progress.",
-                    "manualRun": {
-                        "current": clone_action(RUN_STATE["current"]),
-                        "latest": clone_action(RUN_STATE["current"]),
-                        "history": [clone_action(item) for item in RUN_STATE["history"]],
-                        "tokenConfigured": bool(os.environ.get(RUN_TOKEN_ENV, "").strip()),
-                        "postEndpoint": "/run-updater",
-                        "authHeader": RUN_HEADER,
-                    },
+                    "manualRun": get_run_state_snapshot(),
                 }
             else:
                 RUN_STATE["current"] = clone_action(action)
@@ -477,5 +537,6 @@ if __name__ == "__main__":
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"Serving GitHub auto updater status on http://0.0.0.0:{PORT}")
     print(f"Manual updater endpoint: POST http://127.0.0.1:{PORT}/run-updater")
-    print(f"Optional LAN auth token env var: {RUN_TOKEN_ENV}")
+    print(f"Optional read token env var: {READ_TOKEN_ENV}")
+    print(f"Optional manual-run token env var: {RUN_TOKEN_ENV}")
     server.serve_forever()

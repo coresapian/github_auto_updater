@@ -131,6 +131,9 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				INFOPLIST_FILE = GitHubAutoUpdaterApp/Info.plist;
+				INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers = (
+					com.core.githubautoupdater.refresh,
+				);
 				INFOPLIST_KEY_CFBundleDisplayName = "GitHub Auto Updater";
 				INFOPLIST_KEY_CFBundleShortVersionString = 0.1.0;
 				INFOPLIST_KEY_CFBundleVersion = 1;
@@ -138,6 +141,9 @@
 				INFOPLIST_KEY_NSAppTransportSecurity = "[\"NSAllowsArbitraryLoads\": true]";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Access your Mac helper server on the local network to monitor updater status.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIBackgroundModes = (
+					fetch,
+				);
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIRequiredDeviceCapabilities = (
 					armv7,
@@ -289,6 +295,9 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				INFOPLIST_FILE = GitHubAutoUpdaterApp/Info.plist;
+				INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers = (
+					com.core.githubautoupdater.refresh,
+				);
 				INFOPLIST_KEY_CFBundleDisplayName = "GitHub Auto Updater";
 				INFOPLIST_KEY_CFBundleShortVersionString = 0.1.0;
 				INFOPLIST_KEY_CFBundleVersion = 1;
@@ -296,6 +305,9 @@
 				INFOPLIST_KEY_NSAppTransportSecurity = "[\"NSAllowsArbitraryLoads\": true]";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Access your Mac helper server on the local network to monitor updater status.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIBackgroundModes = (
+					fetch,
+				);
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIRequiredDeviceCapabilities = (
 					armv7,

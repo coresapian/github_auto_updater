@@ -9,10 +9,31 @@ enum RepoHealth: String, Codable, CaseIterable {
 
     var label: String {
         switch self {
-        case .ok: return "Green"
-        case .skipped, .warning: return "Yellow"
-        case .failed: return "Red"
-        case .unknown: return "Gray"
+        case .ok:
+            return "Healthy"
+        case .skipped:
+            return "Skipped"
+        case .failed:
+            return "Failed"
+        case .warning:
+            return "Warning"
+        case .unknown:
+            return "Unknown"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .ok:
+            return "checkmark.circle.fill"
+        case .skipped:
+            return "pause.circle.fill"
+        case .failed:
+            return "xmark.octagon.fill"
+        case .warning:
+            return "exclamationmark.triangle.fill"
+        case .unknown:
+            return "questionmark.circle.fill"
         }
     }
 }
@@ -22,6 +43,8 @@ struct RepoStatus: Codable, Identifiable, Hashable {
     let repo: String
     let state: RepoHealth
     let summary: String
+    let updatedAt: Date?
+    let logPath: String?
 }
 
 struct SummaryCounts: Codable, Hashable {
@@ -38,6 +61,32 @@ struct LatestSummary: Codable, Hashable {
     let runStamp: String?
     let summary: String?
     let counts: SummaryCounts?
+}
+
+struct DashboardSummary: Codable, Hashable {
+    let totalRepos: Int
+    let healthyRepos: Int
+    let attentionRepos: Int
+    let failedRepos: Int
+    let warningRepos: Int
+    let skippedRepos: Int
+    let unknownRepos: Int
+    let backupsCount: Int
+    let alertLogPresent: Bool
+    let latestRepoUpdate: Date?
+
+    static let placeholder = DashboardSummary(
+        totalRepos: 0,
+        healthyRepos: 0,
+        attentionRepos: 0,
+        failedRepos: 0,
+        warningRepos: 0,
+        skippedRepos: 0,
+        unknownRepos: 0,
+        backupsCount: 0,
+        alertLogPresent: false,
+        latestRepoUpdate: nil
+    )
 }
 
 struct ManualRunProgress: Codable, Hashable {
@@ -81,16 +130,6 @@ struct ManualRunAction: Codable, Identifiable, Hashable {
         default: return state.capitalized
         }
     }
-
-    var tintName: String {
-        switch state {
-        case "queued": return "orange"
-        case "running": return "blue"
-        case "succeeded": return "green"
-        case "failed": return "red"
-        default: return "gray"
-        }
-    }
 }
 
 struct ManualRunState: Codable, Hashable {
@@ -123,6 +162,8 @@ struct StatusResponse: Codable {
     let crontab: String
     let latestSummary: LatestSummary
     let manualRun: ManualRunState
+    let helperTime: Date?
+    let dashboard: DashboardSummary
 
     static let placeholder = StatusResponse(
         cronInstalled: false,
@@ -135,7 +176,9 @@ struct StatusResponse: Codable {
         repos: [],
         crontab: "",
         latestSummary: LatestSummary(runStamp: nil, summary: nil, counts: nil),
-        manualRun: .empty
+        manualRun: .empty,
+        helperTime: nil,
+        dashboard: .placeholder
     )
 }
 
@@ -148,4 +191,53 @@ struct RunUpdaterResponse: Codable {
     let ok: Bool?
     let error: String?
     let manualRun: ManualRunState?
+}
+
+enum LogSource: String, CaseIterable, Identifiable {
+    case main
+    case alert
+    case repo
+
+    var id: String { rawValue }
+
+    var title: String { rawValue.capitalized }
+}
+
+enum LogSeverityFilter: String, CaseIterable, Identifiable {
+    case all
+    case info
+    case warning
+    case error
+    case matched
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all: return "All"
+        case .info: return "Info"
+        case .warning: return "Warn"
+        case .error: return "Error"
+        case .matched: return "Match"
+        }
+    }
+}
+
+struct LogLine: Identifiable, Hashable {
+    let text: String
+    let index: Int
+
+    var id: Int { index }
+    var normalized: String { text.lowercased() }
+
+    var severity: LogSeverityFilter {
+        let value = normalized
+        if value.contains("error") || value.contains("failed") || value.contains("fatal") {
+            return .error
+        }
+        if value.contains("warn") || value.contains("skip") || value.contains("stale") {
+            return .warning
+        }
+        return .info
+    }
 }
