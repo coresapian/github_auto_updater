@@ -2,6 +2,7 @@ import BackgroundTasks
 import Foundation
 import Security
 import SwiftUI
+import UIKit
 
 private enum HelperTokenKeychain {
     private static let service = "com.core.githubautoupdater"
@@ -55,6 +56,8 @@ final class AppViewModel: ObservableObject {
     @AppStorage("refreshInterval") var refreshInterval: Double = 30
     @AppStorage("autoRefreshWhileOpen") var autoRefreshWhileOpen: Bool = true
     @AppStorage("backgroundRefreshEnabled") var backgroundRefreshEnabled: Bool = true
+    @AppStorage("pairingCode") var pairingCode: String = ""
+    @AppStorage("deviceName") var deviceName: String = UIDevice.current.name
 
     @Published var helperToken: String {
         didSet {
@@ -67,6 +70,7 @@ final class AppViewModel: ObservableObject {
         }
     }
     @Published var status: StatusResponse = .placeholder
+    @Published var pairingStatus: PairingStatus = .placeholder
     @Published var selectedRepo: RepoStatus?
     @Published var mainLogText: String = ""
     @Published var alertLogText: String = ""
@@ -74,7 +78,9 @@ final class AppViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var isLoading: Bool = false
     @Published var isTriggeringManualRun: Bool = false
+    @Published var isPairing: Bool = false
     @Published var manualRunMessage: String?
+    @Published var pairingMessage: String?
     @Published var lastRefreshDate: Date?
     @Published var nextAutomaticRefreshDate: Date?
     @Published var selectedLogSource: LogSource = .main
@@ -107,12 +113,9 @@ final class AppViewModel: ObservableObject {
 
     var filteredRepos: [RepoStatus] {
         switch dashboardRepoFilter {
-        case .all:
-            return status.repos
-        case .needsAttention:
-            return status.repos.filter { $0.state != .ok }
-        case .healthy:
-            return status.repos.filter { $0.state == .ok }
+        case .all: return status.repos
+        case .needsAttention: return status.repos.filter { $0.state != .ok }
+        case .healthy: return status.repos.filter { $0.state == .ok }
         }
     }
 
@@ -149,6 +152,10 @@ final class AppViewModel: ObservableObject {
         case .alert: return "Alert log"
         case .repo: return selectedRepo?.repo ?? "Repo log"
         }
+    }
+
+    var hasHelperToken: Bool {
+        !helperToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     func start() {
@@ -197,8 +204,10 @@ final class AppViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         do {
+            pairingStatus = try await api.fetchPairingStatus(baseURL: serverURL)
             let status = try await api.fetchStatus(baseURL: serverURL, authToken: helperToken)
             self.status = status
+            self.pairingStatus = status.pairing
             if selectedRepo == nil {
                 selectedRepo = status.repos.first
             } else if let selectedRepo {
@@ -218,8 +227,51 @@ final class AppViewModel: ObservableObject {
                 await scheduleBackgroundRefreshIfNeeded()
             }
         } catch {
+            do {
+                pairingStatus = try await api.fetchPairingStatus(baseURL: serverURL)
+            } catch {
+            }
             errorMessage = error.localizedDescription
         }
+    }
+
+    func refreshPairingStatus() async {
+        do {
+            pairingStatus = try await api.fetchPairingStatus(baseURL: serverURL)
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func pairCurrentDevice() async {
+        let code = pairingCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let device = deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else {
+            errorMessage = "Enter the pairing code shown by the Mac helper."
+            return
+        }
+        guard !device.isEmpty else {
+            errorMessage = "Enter a device name for this token."
+            return
+        }
+        isPairing = true
+        defer { isPairing = false }
+        do {
+            let response = try await api.exchangePairingCode(baseURL: serverURL, pairingCode: code, deviceName: device)
+            helperToken = response.authToken
+            pairingCode = ""
+            pairingMessage = "Paired as \(response.deviceName). Token \(response.tokenPreview) saved to Keychain."
+            errorMessage = nil
+            await refresh(reason: .manual)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func clearHelperToken() {
+        helperToken = ""
+        pairingMessage = nil
     }
 
     func triggerManualRun() async {
@@ -242,7 +294,8 @@ final class AppViewModel: ObservableObject {
                     latestSummary: status.latestSummary,
                     manualRun: manualRun,
                     helperTime: status.helperTime,
-                    dashboard: status.dashboard
+                    dashboard: status.dashboard,
+                    pairing: pairingStatus
                 )
             }
             manualRunMessage = response.manualRun?.latest?.statusMessage ?? "Manual updater run requested."

@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 import ast
+import base64
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import threading
 import time
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
@@ -20,6 +24,8 @@ MAIN_LOG = HOME / ".local/var/log/github-auto-update.log"
 ALERT_LOG = HOME / ".local/var/log/github-auto-update.alert.log"
 REPO_LOG_DIR = HOME / ".local/var/log/github-auto-update"
 GITHUB_DIR = HOME / "Documents/GitHub"
+CONFIG_DIR = HOME / ".config/github-auto-updater"
+SECURITY_STATE_PATH = CONFIG_DIR / "helper_security.json"
 CRON_ENTRY = f"*/30 * * * * {SCRIPT_PATH}"
 PORT = 8787
 RUN_TOKEN_ENV = "GITHUB_AUTO_UPDATER_HELPER_TOKEN"
@@ -28,13 +34,28 @@ RUN_HEADER = "X-Updater-Token"
 AUTH_HEADER = "Authorization"
 MAX_ACTION_HISTORY = 8
 POLL_SECONDS = 1.0
+PAIRING_TTL_HOURS = 24
+MAX_ISSUED_TOKENS = 20
 
 RUN_STATE = {"current": None, "history": []}
 RUN_LOCK = threading.Lock()
 
 
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return utc_now().replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
 
 
 def isoformat_timestamp(ts: float | None) -> str | None:
@@ -243,6 +264,149 @@ def clone_action(action: dict | None) -> dict | None:
     return deepcopy(action) if action else None
 
 
+def load_security_state() -> dict:
+    state = {
+        "helper_instance_id": secrets.token_hex(8),
+        "pairing_code_hash": "",
+        "pairing_code_salt": "",
+        "pairing_code_label": "",
+        "pairing_code_created_at": None,
+        "pairing_code_expires_at": None,
+        "issued_tokens": [],
+    }
+    if SECURITY_STATE_PATH.exists():
+        try:
+            loaded = json.loads(SECURITY_STATE_PATH.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                state.update(loaded)
+        except json.JSONDecodeError:
+            pass
+    return state
+
+
+def save_security_state(state: dict):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    SECURITY_STATE_PATH.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    os.chmod(SECURITY_STATE_PATH, 0o600)
+
+
+def make_secret_record(secret: str) -> tuple[str, str]:
+    salt = secrets.token_hex(16)
+    digest = hashlib.sha256(f"{salt}:{secret}".encode("utf-8")).hexdigest()
+    return salt, digest
+
+
+def verify_secret(secret: str, salt: str, expected_digest: str) -> bool:
+    if not secret or not salt or not expected_digest:
+        return False
+    digest = hashlib.sha256(f"{salt}:{secret}".encode("utf-8")).hexdigest()
+    return hmac.compare_digest(digest, expected_digest)
+
+
+def mask_pairing_code(code: str) -> str:
+    if len(code) <= 2:
+        return "*" * len(code)
+    return f"{'*' * (len(code) - 2)}{code[-2:]}"
+
+
+def generate_pairing_code() -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(8))
+
+
+def current_pairing_record(state: dict) -> dict | None:
+    expires_at = parse_iso(state.get("pairing_code_expires_at"))
+    if not expires_at or expires_at <= utc_now():
+        return None
+    if not state.get("pairing_code_hash") or not state.get("pairing_code_salt"):
+        return None
+    return {
+        "pairingCodeLabel": state.get("pairing_code_label") or "configured",
+        "pairingCodeExpiresAt": state.get("pairing_code_expires_at"),
+        "pairingCodeCreatedAt": state.get("pairing_code_created_at"),
+    }
+
+
+def ensure_pairing_code(state: dict) -> dict:
+    if current_pairing_record(state):
+        return state
+    code = os.getenv("GITHUB_AUTO_UPDATER_PAIRING_CODE", "").strip() or generate_pairing_code()
+    salt, digest = make_secret_record(code)
+    now = utc_now()
+    expires = now + timedelta(hours=PAIRING_TTL_HOURS)
+    state["pairing_code_salt"] = salt
+    state["pairing_code_hash"] = digest
+    state["pairing_code_label"] = mask_pairing_code(code)
+    state["pairing_code_created_at"] = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    state["pairing_code_expires_at"] = expires.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    save_security_state(state)
+    print(f"[pairing] Helper pairing code: {code}")
+    print(f"[pairing] Expires at: {state['pairing_code_expires_at']}")
+    return state
+
+
+def issue_token(state: dict, device_name: str) -> dict:
+    raw_token = base64.urlsafe_b64encode(secrets.token_bytes(24)).decode("utf-8").rstrip("=")
+    salt, digest = make_secret_record(raw_token)
+    token_id = secrets.token_hex(6)
+    issued_at = utc_now_iso()
+    record = {
+        "id": token_id,
+        "device_name": device_name,
+        "salt": salt,
+        "token_hash": digest,
+        "token_prefix": raw_token[:6],
+        "issued_at": issued_at,
+        "last_used_at": None,
+    }
+    tokens = state.get("issued_tokens", [])
+    tokens.append(record)
+    state["issued_tokens"] = tokens[-MAX_ISSUED_TOKENS:]
+    save_security_state(state)
+    return {
+        "authToken": raw_token,
+        "tokenId": token_id,
+        "tokenPreview": f"{raw_token[:6]}…",
+        "issuedAt": issued_at,
+        "deviceName": device_name,
+        "helperInstanceID": state.get("helper_instance_id", ""),
+        "authMode": "bearer-token",
+        "pairingCodeExpiresAt": state.get("pairing_code_expires_at"),
+    }
+
+
+def authenticate_token(state: dict, presented_token: str) -> dict | None:
+    if not presented_token:
+        return None
+    env_token = os.getenv(READ_TOKEN_ENV, "").strip()
+    if env_token and hmac.compare_digest(presented_token, env_token):
+        return {"id": "env", "device_name": "environment", "issued_at": None}
+    run_token = os.getenv(RUN_TOKEN_ENV, "").strip()
+    if run_token and hmac.compare_digest(presented_token, run_token):
+        return {"id": "run-env", "device_name": "run-environment", "issued_at": None}
+    for token in state.get("issued_tokens", []):
+        if verify_secret(presented_token, token.get("salt", ""), token.get("token_hash", "")):
+            token["last_used_at"] = utc_now_iso()
+            save_security_state(state)
+            return token
+    return None
+
+
+def pairing_status_payload(state: dict) -> dict:
+    pairing = current_pairing_record(state)
+    return {
+        "authRequired": True,
+        "authMode": "bearer-token",
+        "helperInstanceID": state.get("helper_instance_id", ""),
+        "pairingAvailable": pairing is not None,
+        "pairingCodeLabel": pairing.get("pairingCodeLabel") if pairing else None,
+        "pairingCodeExpiresAt": pairing.get("pairingCodeExpiresAt") if pairing else None,
+        "pairingInstructions": "On your Mac, start the helper and use the current pairing code shown in the helper output or in this status response. Enter it in the iOS app Settings to exchange it for a saved bearer token.",
+        "activeTokenCount": len(state.get("issued_tokens", [])),
+        "recommendedTransport": "local-network-only",
+    }
+
+
 def get_run_state_snapshot() -> dict:
     with RUN_LOCK:
         current = clone_action(RUN_STATE["current"])
@@ -252,7 +416,7 @@ def get_run_state_snapshot() -> dict:
         "current": current,
         "latest": latest,
         "history": history,
-        "tokenConfigured": bool(os.environ.get(RUN_TOKEN_ENV, "").strip() or os.environ.get(READ_TOKEN_ENV, "").strip()),
+        "tokenConfigured": bool(os.environ.get(RUN_TOKEN_ENV, "").strip() or os.environ.get(READ_TOKEN_ENV, "").strip() or SECURITY_STATE.get("issued_tokens")),
         "postEndpoint": "/run-updater",
         "authHeader": RUN_HEADER,
     }
@@ -370,11 +534,15 @@ def status_payload() -> dict:
         "manualRun": get_run_state_snapshot(),
         "helperTime": utc_now_iso(),
         "dashboard": build_dashboard_summary(repos, backups),
+        "pairing": pairing_status_payload(SECURITY_STATE),
     }
 
 
+SECURITY_STATE = ensure_pairing_code(load_security_state())
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "GitHubAutoUpdaterHelper/0.3"
+    server_version = "GitHubAutoUpdaterHelper/0.4"
 
     def _send(self, payload: dict, status: int = 200):
         body = json.dumps(payload).encode("utf-8")
@@ -422,11 +590,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _authorize_read(self, body: dict | None = None) -> tuple[bool, str]:
         configured = os.environ.get(READ_TOKEN_ENV, "").strip()
-        if not configured:
-            return True, ""
         supplied = self._extract_token(body)
-        if supplied != configured:
-            return False, f"Missing or invalid bearer token for {READ_TOKEN_ENV}."
+        if configured:
+            if supplied != configured:
+                return False, f"Missing or invalid bearer token for {READ_TOKEN_ENV}."
+            return True, ""
+        if SECURITY_STATE.get("issued_tokens"):
+            if authenticate_token(SECURITY_STATE, supplied):
+                return True, ""
+            return False, "Missing or invalid paired-device bearer token."
         return True, ""
 
     def _authorize_manual_post(self, body: dict) -> tuple[bool, str]:
@@ -437,11 +609,11 @@ class Handler(BaseHTTPRequestHandler):
             return False, "Manual updater POST is only allowed from loopback or private-network clients."
         configured_token = os.environ.get(RUN_TOKEN_ENV, "").strip()
         supplied_token = self._extract_token(body)
-        if configured_token and supplied_token != configured_token:
+        if configured_token and supplied_token != configured_token and not authenticate_token(SECURITY_STATE, supplied_token):
             return False, f"Missing or invalid {RUN_HEADER}."
         try:
-            if not configured_token and not ipaddress.ip_address(self._client_ip()).is_loopback:
-                return False, f"Set {RUN_TOKEN_ENV} before allowing LAN-triggered manual runs."
+            if not configured_token and not supplied_token and not ipaddress.ip_address(self._client_ip()).is_loopback:
+                return False, f"Pair this device first or set {RUN_TOKEN_ENV} before allowing LAN-triggered manual runs."
         except ValueError:
             return False, "Unable to validate client IP."
         return True, ""
@@ -451,6 +623,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.rstrip("/") or "/"
+        if path == "/pairing/status":
+            self._send(pairing_status_payload(SECURITY_STATE))
+            return
         allowed, message = self._authorize_read()
         if not allowed:
             self._send({"error": message}, status=401)
@@ -474,13 +649,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.rstrip("/") or "/"
-        if path != "/run-updater":
-            self._send({"error": "not found"}, status=404)
-            return
         try:
             body = self._read_json_body()
         except ValueError as exc:
             self._send({"error": str(exc)}, status=400)
+            return
+
+        if path == "/pairing/exchange":
+            code = str(body.get("pairingCode", "")).strip().upper()
+            device_name = str(body.get("deviceName", "")).strip() or "iPhone"
+            current = current_pairing_record(SECURITY_STATE)
+            if not current:
+                self._send({"error": "No active pairing code is available. Restart the helper to generate a new code."}, status=409)
+                return
+            if not verify_secret(code, SECURITY_STATE.get("pairing_code_salt", ""), SECURITY_STATE.get("pairing_code_hash", "")):
+                self._send({"error": "Invalid pairing code."}, status=403)
+                return
+            payload = issue_token(SECURITY_STATE, device_name)
+            self._send(payload, status=201)
+            return
+
+        if path != "/run-updater":
+            self._send({"error": "not found"}, status=404)
             return
         allowed, message = self._authorize_manual_post(body)
         if not allowed:
@@ -514,10 +704,7 @@ class Handler(BaseHTTPRequestHandler):
         }
         with RUN_LOCK:
             if RUN_STATE["current"]:
-                already_running = {
-                    "error": "Updater run already in progress.",
-                    "manualRun": get_run_state_snapshot(),
-                }
+                already_running = {"error": "Updater run already in progress.", "manualRun": get_run_state_snapshot()}
             else:
                 RUN_STATE["current"] = clone_action(action)
                 RUN_STATE["history"] = [clone_action(action)] + [item for item in RUN_STATE["history"] if item.get("id") != action.get("id")]
@@ -536,6 +723,8 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"Serving GitHub auto updater status on http://0.0.0.0:{PORT}")
+    print(f"Pairing status endpoint: GET http://127.0.0.1:{PORT}/pairing/status")
+    print(f"Pairing exchange endpoint: POST http://127.0.0.1:{PORT}/pairing/exchange")
     print(f"Manual updater endpoint: POST http://127.0.0.1:{PORT}/run-updater")
     print(f"Optional read token env var: {READ_TOKEN_ENV}")
     print(f"Optional manual-run token env var: {RUN_TOKEN_ENV}")

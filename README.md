@@ -35,10 +35,33 @@ Current monitored assets on the Mac:
 - alert log: `/Users/core/.local/var/log/github-auto-update.alert.log`
 - per-repo logs: `/Users/core/.local/var/log/github-auto-update/`
 
-Status API:
-- `GET /status` returns cron status, repo status, latest summary counts, and helper-maintained manual-run state/history.
+Pairing flow:
+1. Start the helper server on your Mac:
+   `python3 helper/status_server.py`
+2. Note the pairing code printed by the helper, or fetch it from:
+   `GET /pairing/status`
+3. In the iOS app Settings tab, enter:
+   - Mac helper URL
+   - device name
+   - pairing code
+4. Tap `Pair with Mac helper`.
+5. The app exchanges the code for a bearer token and stores it in Keychain.
+6. Future status/log reads and manual updater requests use that saved token automatically.
+
+Helper endpoints:
+- `GET /pairing/status`
+- `POST /pairing/exchange`
+- `GET /status`
 - `GET /log/main`
 - `GET /log/alert`
+- `GET /log/repo/<repo>`
+- `POST /run-updater`
+
+Notes:
+- This is a real iOS app scaffold, not a Tkinter wrapper.
+- Finder-opening and crontab-editing remain Mac-only operations, so those stay on the Mac helper side rather than the iPhone UI.
+- The helper supports optional env-based tokens, but pairing now provides app-specific bearer tokens for devices on your local network.
+
 - `GET /log/repo/<repo-name>`
 
 Manual run endpoint:

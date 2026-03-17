@@ -64,6 +64,7 @@ struct DashboardView: View {
                     }
 
                     updaterCard
+                    pairingCard
                     manualRunCard
                     repoSection
 
@@ -115,6 +116,27 @@ struct DashboardView: View {
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
+            }
+        }
+    }
+
+    private var pairingCard: some View {
+        DashboardCard(title: "Pairing & auth", systemImage: "lock.shield.fill") {
+            VStack(alignment: .leading, spacing: 10) {
+                StatusRow(label: "Auth required", value: viewModel.pairingStatus.authRequired ? "Yes" : "No")
+                StatusRow(label: "Auth mode", value: viewModel.pairingStatus.authMode)
+                StatusRow(label: "Helper instance", value: viewModel.pairingStatus.helperInstanceID.isEmpty ? "Unknown" : viewModel.pairingStatus.helperInstanceID)
+                StatusRow(label: "Pairing available", value: viewModel.pairingStatus.pairingAvailable ? "Yes" : "No")
+                if let code = viewModel.pairingStatus.pairingCodeLabel, !code.isEmpty {
+                    StatusRow(label: "Pairing code", value: code)
+                }
+                if let expiry = viewModel.pairingStatus.pairingCodeExpiresAt, !expiry.isEmpty {
+                    StatusRow(label: "Pairing expires", value: viewModel.formattedTimestamp(expiry))
+                }
+                StatusRow(label: "Saved token", value: viewModel.hasHelperToken ? "Present in Keychain" : "Not paired")
+                Text(viewModel.pairingStatus.pairingInstructions)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -361,14 +383,51 @@ struct SettingsView: View {
                     Toggle("Background refresh", isOn: $viewModel.backgroundRefreshEnabled)
                 }
 
-                Section("Manual run notes") {
-                    Text("Manual runs use POST /run-updater. If the helper is configured with an auth token, enter the same token here. The app stores the token in Keychain.")
+                Section("Pair this device") {
+                    TextField("Device name", text: $viewModel.deviceName)
+                    TextField("Pairing code", text: $viewModel.pairingCode)
+                        .textInputAutocapitalization(.characters)
+                        .autocorrectionDisabled()
+                    Button {
+                        Task { await viewModel.pairCurrentDevice() }
+                    } label: {
+                        HStack {
+                            if viewModel.isPairing {
+                                ProgressView().controlSize(.small)
+                            }
+                            Text(viewModel.isPairing ? "Pairing…" : "Pair with Mac helper")
+                        }
+                    }
+                    .disabled(viewModel.isPairing)
+
+                    Button("Refresh pairing status") {
+                        Task { await viewModel.refreshPairingStatus() }
+                    }
+
+                    if let message = viewModel.pairingMessage, !message.isEmpty {
+                        Text(message)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(viewModel.pairingStatus.pairingInstructions)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    if let code = viewModel.pairingStatus.pairingCodeLabel, !code.isEmpty {
+                        LabeledContent("Current code", value: code)
+                    }
+                    if let expiry = viewModel.pairingStatus.pairingCodeExpiresAt, !expiry.isEmpty {
+                        LabeledContent("Expires", value: viewModel.formattedTimestamp(expiry))
+                    }
+                    LabeledContent("Saved token", value: viewModel.hasHelperToken ? "Present in Keychain" : "Not saved")
+                    if viewModel.hasHelperToken {
+                        Button("Clear saved token", role: .destructive) {
+                            viewModel.clearHelperToken()
+                        }
+                    }
                 }
 
-                Section("App behavior") {
-                    Text("The app now supports foreground auto-refresh, background refresh scheduling, log filtering/search, and richer dashboard cards. Finder/crontab actions remain Mac-side.")
+                Section("Manual run notes") {
+                    Text("Manual runs use POST /run-updater. After pairing, the saved token is used automatically for authenticated reads and updater requests.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -406,7 +465,7 @@ struct ConnectionStatusCard: View {
                 StatusRow(label: "Server", value: viewModel.serverURL)
                 StatusRow(label: "Last refresh", value: viewModel.formattedDate(viewModel.lastRefreshDate))
                 StatusRow(label: "Next auto refresh", value: viewModel.formattedDate(viewModel.nextAutomaticRefreshDate))
-                StatusRow(label: "Helper token", value: viewModel.helperToken.isEmpty ? "Not configured" : "Configured")
+                StatusRow(label: "Helper token", value: viewModel.hasHelperToken ? "Present in Keychain" : "Not configured")
             }
         }
     }

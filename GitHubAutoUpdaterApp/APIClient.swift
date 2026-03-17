@@ -10,6 +10,28 @@ struct APIClient {
         return try decoder.decode(StatusResponse.self, from: data)
     }
 
+    func fetchPairingStatus(baseURL: String) async throws -> PairingStatus {
+        let url = try makeURL(baseURL: baseURL, path: "/pairing/status")
+        let (data, response) = try await URLSession.shared.data(from: url)
+        try validate(response: response, data: data)
+        return try decoder.decode(PairingStatus.self, from: data)
+    }
+
+    func exchangePairingCode(baseURL: String, pairingCode: String, deviceName: String) async throws -> PairingExchangeResponse {
+        let url = try makeURL(baseURL: baseURL, path: "/pairing/exchange")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let payload = [
+            "pairingCode": pairingCode,
+            "deviceName": deviceName
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+        return try decoder.decode(PairingExchangeResponse.self, from: data)
+    }
+
     func fetchLog(baseURL: String, kind: String, repo: String? = nil, authToken: String? = nil) async throws -> LogResponse {
         var path = "/log/\(kind)"
         if let repo, !repo.isEmpty {
@@ -29,11 +51,7 @@ struct APIClient {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            request.setValue(trimmed, forHTTPHeaderField: "X-Updater-Token")
-            request.setValue("Bearer \(trimmed)", forHTTPHeaderField: "Authorization")
-        }
+        applyAuth(token, to: &request)
         request.httpBody = try JSONSerialization.data(withJSONObject: ["requestedBy": "ios-app"], options: [])
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response: response, data: data)
@@ -58,7 +76,7 @@ struct APIClient {
             throw URLError(.badServerResponse)
         }
         guard (200 ... 299).contains(httpResponse.statusCode) else {
-            if let apiError = try? JSONDecoder().decode(RunUpdaterResponse.self, from: data), let message = apiError.error, !message.isEmpty {
+            if let runError = try? decoder.decode(RunUpdaterResponse.self, from: data), let message = runError.error, !message.isEmpty {
                 throw APIClientError.server(message)
             }
             if let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let error = payload["error"] as? String {

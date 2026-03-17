@@ -9,31 +9,21 @@ enum RepoHealth: String, Codable, CaseIterable {
 
     var label: String {
         switch self {
-        case .ok:
-            return "Healthy"
-        case .skipped:
-            return "Skipped"
-        case .failed:
-            return "Failed"
-        case .warning:
-            return "Warning"
-        case .unknown:
-            return "Unknown"
+        case .ok: return "Healthy"
+        case .skipped: return "Skipped"
+        case .failed: return "Failed"
+        case .warning: return "Warning"
+        case .unknown: return "Unknown"
         }
     }
 
     var systemImage: String {
         switch self {
-        case .ok:
-            return "checkmark.circle.fill"
-        case .skipped:
-            return "pause.circle.fill"
-        case .failed:
-            return "xmark.octagon.fill"
-        case .warning:
-            return "exclamationmark.triangle.fill"
-        case .unknown:
-            return "questionmark.circle.fill"
+        case .ok: return "checkmark.circle.fill"
+        case .skipped: return "pause.circle.fill"
+        case .failed: return "xmark.octagon.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        case .unknown: return "questionmark.circle.fill"
         }
     }
 }
@@ -150,6 +140,41 @@ struct ManualRunState: Codable, Hashable {
     )
 }
 
+struct PairingStatus: Codable, Hashable {
+    let authRequired: Bool
+    let authMode: String
+    let helperInstanceID: String
+    let pairingAvailable: Bool
+    let pairingCodeLabel: String?
+    let pairingCodeExpiresAt: String?
+    let pairingInstructions: String
+    let activeTokenCount: Int
+    let recommendedTransport: String
+
+    static let placeholder = PairingStatus(
+        authRequired: false,
+        authMode: "bearer-token",
+        helperInstanceID: "",
+        pairingAvailable: false,
+        pairingCodeLabel: nil,
+        pairingCodeExpiresAt: nil,
+        pairingInstructions: "Start the Mac helper to load pairing information.",
+        activeTokenCount: 0,
+        recommendedTransport: "local-network-only"
+    )
+}
+
+struct PairingExchangeResponse: Codable, Hashable {
+    let authToken: String
+    let tokenId: String
+    let tokenPreview: String
+    let issuedAt: String
+    let deviceName: String
+    let helperInstanceID: String
+    let authMode: String
+    let pairingCodeExpiresAt: String?
+}
+
 struct StatusResponse: Codable {
     let cronInstalled: Bool
     let cronEntry: String
@@ -164,6 +189,7 @@ struct StatusResponse: Codable {
     let manualRun: ManualRunState
     let helperTime: Date?
     let dashboard: DashboardSummary
+    let pairing: PairingStatus
 
     static let placeholder = StatusResponse(
         cronInstalled: false,
@@ -178,7 +204,8 @@ struct StatusResponse: Codable {
         latestSummary: LatestSummary(runStamp: nil, summary: nil, counts: nil),
         manualRun: .empty,
         helperTime: nil,
-        dashboard: .placeholder
+        dashboard: .placeholder,
+        pairing: .placeholder
     )
 }
 
@@ -199,7 +226,6 @@ enum LogSource: String, CaseIterable, Identifiable {
     case repo
 
     var id: String { rawValue }
-
     var title: String { rawValue.capitalized }
 }
 
