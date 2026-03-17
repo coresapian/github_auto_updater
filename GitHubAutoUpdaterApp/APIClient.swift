@@ -22,14 +22,26 @@ struct APIClient {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let payload = [
-            "pairingCode": pairingCode,
-            "deviceName": deviceName
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["pairingCode": pairingCode, "deviceName": deviceName])
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response: response, data: data)
         return try decoder.decode(PairingExchangeResponse.self, from: data)
+    }
+
+    func registerDevice(baseURL: String, authToken: String, deviceToken: String, deviceName: String) async throws -> DeviceRegistrationResponse {
+        let url = try makeURL(baseURL: baseURL, path: "/devices/register")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        applyAuth(authToken, to: &request)
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "deviceToken": deviceToken,
+            "deviceName": deviceName,
+            "platform": "ios"
+        ])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+        return try decoder.decode(DeviceRegistrationResponse.self, from: data)
     }
 
     func fetchLog(baseURL: String, kind: String, repo: String? = nil, authToken: String? = nil) async throws -> LogResponse {
@@ -52,7 +64,7 @@ struct APIClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         applyAuth(token, to: &request)
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["requestedBy": "ios-app"], options: [])
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["requestedBy": "ios-app"])
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response: response, data: data)
         return try decoder.decode(RunUpdaterResponse.self, from: data)
@@ -72,13 +84,8 @@ struct APIClient {
     }
 
     private func validate(response: URLResponse, data: Data) throws {
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw URLError(.badServerResponse)
-        }
+        guard let httpResponse = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         guard (200 ... 299).contains(httpResponse.statusCode) else {
-            if let runError = try? decoder.decode(RunUpdaterResponse.self, from: data), let message = runError.error, !message.isEmpty {
-                throw APIClientError.server(message)
-            }
             if let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let error = payload["error"] as? String {
                 throw APIClientError.server(error)
             }
@@ -91,20 +98,16 @@ struct APIClient {
             throw URLError(.badURL)
         }
         components.path = path
-        guard let url = components.url else {
-            throw URLError(.badURL)
-        }
+        guard let url = components.url else { throw URLError(.badURL) }
         return url
     }
 }
 
 enum APIClientError: LocalizedError {
     case server(String)
-
     var errorDescription: String? {
         switch self {
-        case .server(let message):
-            return message
+        case .server(let message): return message
         }
     }
 }

@@ -28,7 +28,7 @@ GITHUB_DIR = HOME / "Documents/GitHub"
 CONFIG_DIR = HOME / ".config/github-auto-updater"
 SECURITY_STATE_PATH = CONFIG_DIR / "helper_security.json"
 CRON_ENTRY = f"*/30 * * * * {SCRIPT_PATH}"
-PORT = 8787
+PORT = int(os.getenv("GITHUB_AUTO_UPDATER_HELPER_PORT", "8787"))
 RUN_TOKEN_ENV = "GITHUB_AUTO_UPDATER_HELPER_TOKEN"
 READ_TOKEN_ENV = "GITHUB_AUTO_UPDATER_AUTH_TOKEN"
 RUN_HEADER = "X-Updater-Token"
@@ -39,9 +39,18 @@ PAIRING_TTL_HOURS = 24
 MAX_ISSUED_TOKENS = 20
 NTFY_TOPIC_ENV = "GITHUB_AUTO_UPDATER_NTFY_TOPIC"
 WEBHOOK_URL_ENV = "GITHUB_AUTO_UPDATER_WEBHOOK_URL"
+APNS_TEAM_ID_ENV = "GITHUB_AUTO_UPDATER_APNS_TEAM_ID"
+APNS_KEY_ID_ENV = "GITHUB_AUTO_UPDATER_APNS_KEY_ID"
+APNS_KEY_PATH_ENV = "GITHUB_AUTO_UPDATER_APNS_KEY_PATH"
+APNS_TOPIC_ENV = "GITHUB_AUTO_UPDATER_APNS_TOPIC"
+APNS_USE_SANDBOX_ENV = "GITHUB_AUTO_UPDATER_APNS_USE_SANDBOX"
+BONJOUR_SERVICE_NAME_ENV = "GITHUB_AUTO_UPDATER_BONJOUR_NAME"
+BONJOUR_SERVICE_TYPE = "_ghupdater._tcp"
+BONJOUR_SERVICE_DOMAIN = "local"
 
 RUN_STATE = {"current": None, "history": []}
 RUN_LOCK = threading.Lock()
+BONJOUR_PROCESS = None
 
 
 def utc_now() -> datetime:
@@ -75,22 +84,25 @@ def read_text(path: Path, tail_lines: int = 300) -> str:
     return "\n".join(lines[-tail_lines:]) + ("\n" if lines else "")
 
 
-def run_cmd(cmd: list[str], timeout: int = 20) -> tuple[int, str]:
+def run_cmd(cmd: list[str], timeout: int = 20, input_bytes: bytes | None = None) -> tuple[int, str, bytes]:
     try:
         result = subprocess.run(
             cmd,
+            input=input_bytes,
             capture_output=True,
-            text=True,
+            text=input_bytes is None,
             timeout=timeout,
             cwd=HOME,
         )
-        return result.returncode, ((result.stdout or "") + (result.stderr or "")).strip()
+        if input_bytes is None:
+            return result.returncode, ((result.stdout or "") + (result.stderr or "")).strip(), b""
+        return result.returncode, (result.stderr or "").strip(), result.stdout or b""
     except Exception as exc:
-        return 1, str(exc)
+        return 1, str(exc), b""
 
 
 def get_crontab() -> str:
-    rc, out = run_cmd(["crontab", "-l"], timeout=10)
+    rc, out, _ = run_cmd(["crontab", "-l"], timeout=10)
     if rc != 0 and "no crontab" not in out.lower():
         return out or "Unable to read crontab"
     return out
@@ -99,11 +111,10 @@ def get_crontab() -> str:
 def list_backups() -> list[str]:
     if not GITHUB_DIR.exists():
         return []
-    paths = []
-    for item in GITHUB_DIR.iterdir():
-        if item.is_dir() and ("backup-" in item.name or ".corrupt-backup-" in item.name):
-            paths.append(str(item))
-    return sorted(paths, key=str.lower)
+    return sorted([
+        str(item) for item in GITHUB_DIR.iterdir()
+        if item.is_dir() and ("backup-" in item.name or ".corrupt-backup-" in item.name)
+    ], key=str.lower)
 
 
 def file_timestamp(path: Path) -> str | None:
@@ -276,6 +287,7 @@ def load_security_state() -> dict:
         "pairing_code_created_at": None,
         "pairing_code_expires_at": None,
         "issued_tokens": [],
+        "registered_devices": [],
         "last_notification_sent_at": None,
         "last_notification_result": None,
         "last_notification_run_stamp": None,
@@ -407,12 +419,10 @@ def pairing_status_payload(state: dict) -> dict:
         "pairingAvailable": pairing is not None,
         "pairingCodeLabel": pairing.get("pairingCodeLabel") if pairing else None,
         "pairingCodeExpiresAt": pairing.get("pairingCodeExpiresAt") if pairing else None,
-        "pairingInstructions": "On your Mac, start the helper and use the current pairing code shown in the helper output or in this status response. Enter it in the iOS app Settings to exchange it for a saved bearer token.",
+        "pairingInstructions": f"On your Mac, start the helper and use the current pairing code. You can also discover the helper over Bonjour service type {BONJOUR_SERVICE_TYPE}.",
         "activeTokenCount": len(state.get("issued_tokens", [])),
         "recommendedTransport": "local-network-only",
     }
-
-
 
 
 def notification_status_payload(state: dict) -> dict:
@@ -421,13 +431,129 @@ def notification_status_payload(state: dict) -> dict:
         channels.append('ntfy')
     if os.getenv(WEBHOOK_URL_ENV, '').strip():
         channels.append('webhook')
+    if apns_configured():
+        channels.append('apns')
     return {
         'configured': bool(channels),
         'channels': channels,
         'lastSentAt': state.get('last_notification_sent_at'),
         'lastResult': state.get('last_notification_result'),
         'lastRunStamp': state.get('last_notification_run_stamp'),
+        'registeredDeviceCount': len(state.get('registered_devices', [])),
+        'apnsConfigured': apns_configured(),
     }
+
+
+def apns_configured() -> bool:
+    return all(os.getenv(env, '').strip() for env in [APNS_TEAM_ID_ENV, APNS_KEY_ID_ENV, APNS_KEY_PATH_ENV, APNS_TOPIC_ENV])
+
+
+def b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode('utf-8').rstrip('=')
+
+
+def _der_read_length(data: bytes, idx: int) -> tuple[int, int]:
+    first = data[idx]
+    idx += 1
+    if first < 0x80:
+        return first, idx
+    count = first & 0x7F
+    value = int.from_bytes(data[idx:idx+count], 'big')
+    return value, idx + count
+
+
+def der_to_raw_signature(der: bytes) -> bytes:
+    if not der or der[0] != 0x30:
+        raise ValueError('Invalid DER signature')
+    _, idx = _der_read_length(der, 1)
+    if der[idx] != 0x02:
+        raise ValueError('Invalid DER signature')
+    r_len, idx = _der_read_length(der, idx + 1)
+    r = der[idx:idx+r_len]
+    idx += r_len
+    if der[idx] != 0x02:
+        raise ValueError('Invalid DER signature')
+    s_len, idx = _der_read_length(der, idx + 1)
+    s = der[idx:idx+s_len]
+    r = r.lstrip(b'\x00').rjust(32, b'\x00')
+    s = s.lstrip(b'\x00').rjust(32, b'\x00')
+    return r + s
+
+
+def apns_jwt() -> str:
+    team_id = os.getenv(APNS_TEAM_ID_ENV, '').strip()
+    key_id = os.getenv(APNS_KEY_ID_ENV, '').strip()
+    key_path = os.getenv(APNS_KEY_PATH_ENV, '').strip()
+    header = b64url(json.dumps({"alg": "ES256", "kid": key_id}, separators=(",", ":")).encode())
+    claims = b64url(json.dumps({"iss": team_id, "iat": int(time.time())}, separators=(",", ":")).encode())
+    signing_input = f"{header}.{claims}".encode()
+    rc, err, sig_der = run_cmd(["openssl", "dgst", "-sha256", "-sign", key_path], timeout=15, input_bytes=signing_input)
+    if rc != 0:
+        raise RuntimeError(err or 'openssl sign failed')
+    sig = der_to_raw_signature(sig_der)
+    return f"{header}.{claims}.{b64url(sig)}"
+
+
+def register_device_token(state: dict, token: str, device_name: str, platform: str) -> dict:
+    devices = state.get('registered_devices', [])
+    existing = next((d for d in devices if d.get('token') == token), None)
+    now = utc_now_iso()
+    if existing:
+        existing['device_name'] = device_name
+        existing['platform'] = platform
+        existing['updated_at'] = now
+    else:
+        devices.append({
+            'id': secrets.token_hex(6),
+            'token': token,
+            'device_name': device_name,
+            'platform': platform,
+            'updated_at': now,
+        })
+    state['registered_devices'] = devices[-50:]
+    save_security_state(state)
+    return {'registeredDeviceCount': len(state['registered_devices'])}
+
+
+def send_apns_notifications_if_needed(state: dict, title: str, body: str, summary: dict) -> list[str]:
+    results = []
+    if not apns_configured():
+        return results
+    devices = state.get('registered_devices', [])
+    if not devices:
+        return results
+    topic = os.getenv(APNS_TOPIC_ENV, '').strip()
+    host = 'api.sandbox.push.apple.com' if os.getenv(APNS_USE_SANDBOX_ENV, '1').strip() != '0' else 'api.push.apple.com'
+    try:
+        bearer = apns_jwt()
+    except Exception as exc:
+        return [f'apns-jwt-error:{exc}']
+    payload = json.dumps({
+        'aps': {
+            'alert': {'title': title, 'body': body},
+            'sound': 'default'
+        },
+        'summary': summary,
+    })
+    for device in devices:
+        token = device.get('token', '').strip()
+        if not token:
+            continue
+        cmd = [
+            'curl', '--http2', '-sS', '-o', '/dev/null', '-w', '%{http_code}',
+            '-X', 'POST', f'https://{host}/3/device/{token}',
+            '-H', f'authorization: bearer {bearer}',
+            '-H', 'apns-push-type: alert',
+            '-H', f'apns-topic: {topic}',
+            '-H', 'content-type: application/json',
+            '--data', payload,
+        ]
+        rc, out, _ = run_cmd(cmd, timeout=20)
+        if rc == 0:
+            results.append(f"apns:{device.get('device_name','device')}:{out}")
+        else:
+            results.append(f"apns-error:{device.get('device_name','device')}:{out}")
+    return results
 
 
 def send_failure_notifications_if_needed(state: dict, summary: dict):
@@ -457,120 +583,102 @@ def send_failure_notifications_if_needed(state: dict, summary: dict):
                 results.append(f'webhook:{resp.status}')
         except Exception as exc:
             results.append(f'webhook-error:{exc}')
+    results.extend(send_apns_notifications_if_needed(state, title, body, summary))
     if results:
         state['last_notification_sent_at'] = utc_now_iso()
         state['last_notification_result'] = '; '.join(results)
         state['last_notification_run_stamp'] = run_stamp
         save_security_state(state)
 
+
 def get_run_state_snapshot() -> dict:
     with RUN_LOCK:
-        current = clone_action(RUN_STATE["current"])
-        history = [clone_action(item) for item in RUN_STATE["history"]]
+        current = clone_action(RUN_STATE['current'])
+        history = [clone_action(item) for item in RUN_STATE['history']]
     latest = current or (history[0] if history else None)
     return {
-        "current": current,
-        "latest": latest,
-        "history": history,
-        "tokenConfigured": bool(os.environ.get(RUN_TOKEN_ENV, "").strip() or os.environ.get(READ_TOKEN_ENV, "").strip() or SECURITY_STATE.get("issued_tokens")),
-        "postEndpoint": "/run-updater",
-        "authHeader": RUN_HEADER,
+        'current': current,
+        'latest': latest,
+        'history': history,
+        'tokenConfigured': bool(os.environ.get(RUN_TOKEN_ENV, '').strip() or os.environ.get(READ_TOKEN_ENV, '').strip() or SECURITY_STATE.get('issued_tokens')),
+        'postEndpoint': '/run-updater',
+        'authHeader': RUN_HEADER,
     }
-
-
-def record_action(action: dict):
-    with RUN_LOCK:
-        RUN_STATE["history"] = [clone_action(action)] + [item for item in RUN_STATE["history"] if item.get("id") != action.get("id")]
-        RUN_STATE["history"] = RUN_STATE["history"][:MAX_ACTION_HISTORY]
-        if RUN_STATE["current"] and RUN_STATE["current"].get("id") == action.get("id"):
-            RUN_STATE["current"] = clone_action(action)
 
 
 def update_current_action(mutator):
     with RUN_LOCK:
-        current = RUN_STATE["current"]
+        current = RUN_STATE['current']
         if not current:
             return None
         mutator(current)
         snapshot = clone_action(current)
-        RUN_STATE["history"] = [snapshot] + [item for item in RUN_STATE["history"] if item.get("id") != snapshot.get("id")]
-        RUN_STATE["history"] = RUN_STATE["history"][:MAX_ACTION_HISTORY]
+        RUN_STATE['history'] = [snapshot] + [item for item in RUN_STATE['history'] if item.get('id') != snapshot.get('id')]
+        RUN_STATE['history'] = RUN_STATE['history'][:MAX_ACTION_HISTORY]
         return snapshot
 
 
 def finalize_current_action(action_id: str, finished_action: dict):
     with RUN_LOCK:
-        current = RUN_STATE["current"]
-        if current and current.get("id") == action_id:
-            RUN_STATE["current"] = None
-        RUN_STATE["history"] = [clone_action(finished_action)] + [item for item in RUN_STATE["history"] if item.get("id") != action_id]
-        RUN_STATE["history"] = RUN_STATE["history"][:MAX_ACTION_HISTORY]
+        current = RUN_STATE['current']
+        if current and current.get('id') == action_id:
+            RUN_STATE['current'] = None
+        RUN_STATE['history'] = [clone_action(finished_action)] + [item for item in RUN_STATE['history'] if item.get('id') != action_id]
+        RUN_STATE['history'] = RUN_STATE['history'][:MAX_ACTION_HISTORY]
 
 
 def build_runner_env() -> dict:
     env = os.environ.copy()
-    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:" + env.get("PATH", "")
+    env['PATH'] = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:' + env.get('PATH', '')
     return env
 
 
 def run_updater_in_background(action: dict, repo_targets: list[dict], baseline: dict[str, dict]):
-    action_id = action["id"]
+    action_id = action['id']
     started_epoch = time.time()
 
     def runner():
         proc = None
         try:
             def mark_started(current: dict):
-                current["state"] = "running"
-                current["startedAt"] = utc_now_iso()
-                current["statusMessage"] = "Updater script is running."
-                current["progress"] = compute_progress(repo_targets, baseline, started_epoch)
-
+                current['state'] = 'running'
+                current['startedAt'] = utc_now_iso()
+                current['statusMessage'] = 'Updater script is running.'
+                current['progress'] = compute_progress(repo_targets, baseline, started_epoch)
             update_current_action(mark_started)
-            proc = subprocess.Popen(
-                [sys.executable, str(SCRIPT_PATH)],
-                cwd=str(HOME),
-                env=build_runner_env(),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
+            proc = subprocess.Popen([sys.executable, str(SCRIPT_PATH)], cwd=str(HOME), env=build_runner_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             while proc.poll() is None:
                 progress = compute_progress(repo_targets, baseline, started_epoch)
-
                 def mark_progress(current: dict):
-                    current["pid"] = proc.pid
-                    current["progress"] = progress
-                    if progress.get("lastTouchedRepo"):
-                        current["statusMessage"] = f"Updater script running. Last completed repo: {progress['lastTouchedRepo']}"
-
+                    current['pid'] = proc.pid
+                    current['progress'] = progress
+                    if progress.get('lastTouchedRepo'):
+                        current['statusMessage'] = f"Updater script running. Last completed repo: {progress['lastTouchedRepo']}"
                 update_current_action(mark_progress)
                 time.sleep(POLL_SECONDS)
-
             exit_code = proc.wait(timeout=1)
             summary = latest_main_summary()
             progress = compute_progress(repo_targets, baseline, started_epoch)
-            finished = clone_action(get_run_state_snapshot()["current"] or action) or action
-            finished["state"] = "succeeded" if exit_code == 0 else "failed"
-            finished["finishedAt"] = utc_now_iso()
-            finished["exitCode"] = exit_code
-            finished["progress"] = progress
-            finished["latestSummary"] = summary
-            finished["statusMessage"] = summary.get("summary") or ("Updater completed successfully." if exit_code == 0 else "Updater failed.")
+            finished = clone_action(get_run_state_snapshot()['current'] or action) or action
+            finished['state'] = 'succeeded' if exit_code == 0 else 'failed'
+            finished['finishedAt'] = utc_now_iso()
+            finished['exitCode'] = exit_code
+            finished['progress'] = progress
+            finished['latestSummary'] = summary
+            finished['statusMessage'] = summary.get('summary') or ('Updater completed successfully.' if exit_code == 0 else 'Updater failed.')
             send_failure_notifications_if_needed(SECURITY_STATE, summary)
             finalize_current_action(action_id, finished)
         except Exception as exc:
-            failed = clone_action(get_run_state_snapshot()["current"] or action) or action
-            failed["state"] = "failed"
-            failed["finishedAt"] = utc_now_iso()
-            failed["statusMessage"] = f"Failed to launch updater: {exc}"
-            failed["latestSummary"] = latest_main_summary()
+            failed = clone_action(get_run_state_snapshot()['current'] or action) or action
+            failed['state'] = 'failed'
+            failed['finishedAt'] = utc_now_iso()
+            failed['statusMessage'] = f'Failed to launch updater: {exc}'
+            failed['latestSummary'] = latest_main_summary()
             finalize_current_action(action_id, failed)
             if proc and proc.poll() is None:
                 proc.kill()
 
-    thread = threading.Thread(target=runner, name=f"manual-updater-{action_id}", daemon=True)
-    thread.start()
+    threading.Thread(target=runner, name=f'manual-updater-{action_id}', daemon=True).start()
 
 
 def status_payload() -> dict:
@@ -578,43 +686,72 @@ def status_payload() -> dict:
     repos = [latest_repo_status(path) for path in repo_logs()]
     backups = list_backups()
     return {
-        "cronInstalled": CRON_ENTRY in crontab,
-        "cronEntry": CRON_ENTRY,
-        "scriptPath": str(SCRIPT_PATH),
-        "mainLog": str(MAIN_LOG),
-        "alertLog": str(ALERT_LOG),
-        "repoLogDir": str(REPO_LOG_DIR),
-        "backups": backups,
-        "repos": repos,
-        "crontab": crontab,
-        "latestSummary": latest_main_summary(),
-        "manualRun": get_run_state_snapshot(),
-        "helperTime": utc_now_iso(),
-        "dashboard": build_dashboard_summary(repos, backups),
-        "pairing": pairing_status_payload(SECURITY_STATE),
-        "notifications": notification_status_payload(SECURITY_STATE),
+        'cronInstalled': CRON_ENTRY in crontab,
+        'cronEntry': CRON_ENTRY,
+        'scriptPath': str(SCRIPT_PATH),
+        'mainLog': str(MAIN_LOG),
+        'alertLog': str(ALERT_LOG),
+        'repoLogDir': str(REPO_LOG_DIR),
+        'backups': backups,
+        'repos': repos,
+        'crontab': crontab,
+        'latestSummary': latest_main_summary(),
+        'manualRun': get_run_state_snapshot(),
+        'helperTime': utc_now_iso(),
+        'dashboard': build_dashboard_summary(repos, backups),
+        'pairing': pairing_status_payload(SECURITY_STATE),
+        'notifications': notification_status_payload(SECURITY_STATE),
+        'discovery': {
+            'bonjourServiceName': os.getenv(BONJOUR_SERVICE_NAME_ENV, 'GitHub Auto Updater'),
+            'bonjourServiceType': BONJOUR_SERVICE_TYPE,
+            'port': PORT,
+        },
     }
+
+
+def start_bonjour_advertisement():
+    global BONJOUR_PROCESS
+    if BONJOUR_PROCESS is not None:
+        return
+    service_name = os.getenv(BONJOUR_SERVICE_NAME_ENV, 'GitHub Auto Updater').strip() or 'GitHub Auto Updater'
+    if shutil_which('dns-sd') is None:
+        print('[bonjour] dns-sd not available; skipping Bonjour advertisement')
+        return
+    try:
+        BONJOUR_PROCESS = subprocess.Popen(['dns-sd', '-R', service_name, BONJOUR_SERVICE_TYPE, BONJOUR_SERVICE_DOMAIN, str(PORT)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f'[bonjour] Advertising {service_name} via {BONJOUR_SERVICE_TYPE} on port {PORT}')
+    except Exception as exc:
+        print(f'[bonjour] Failed to advertise service: {exc}')
+        BONJOUR_PROCESS = None
+
+
+def shutil_which(cmd: str):
+    for entry in os.environ.get('PATH', '').split(':'):
+        candidate = Path(entry) / cmd
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
 
 
 SECURITY_STATE = ensure_pairing_code(load_security_state())
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "GitHubAutoUpdaterHelper/0.4"
+    server_version = 'GitHubAutoUpdaterHelper/0.5'
 
     def _send(self, payload: dict, status: int = 200):
-        body = json.dumps(payload).encode("utf-8")
+        body = json.dumps(payload).encode('utf-8')
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", f"Content-Type, {RUN_HEADER}, {AUTH_HEADER}")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Headers', f'Content-Type, {RUN_HEADER}, {AUTH_HEADER}')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.end_headers()
         self.wfile.write(body)
 
     def _client_ip(self) -> str:
-        return self.client_address[0] if self.client_address else ""
+        return self.client_address[0] if self.client_address else ''
 
     def _is_private_or_loopback(self) -> bool:
         try:
@@ -625,7 +762,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _read_json_body(self) -> dict:
         try:
-            content_length = int(self.headers.get("Content-Length", "0"))
+            content_length = int(self.headers.get('Content-Length', '0'))
         except ValueError:
             content_length = 0
         if content_length <= 0:
@@ -634,158 +771,175 @@ class Handler(BaseHTTPRequestHandler):
         if not raw:
             return {}
         try:
-            data = json.loads(raw.decode("utf-8"))
+            data = json.loads(raw.decode('utf-8'))
             return data if isinstance(data, dict) else {}
         except json.JSONDecodeError:
-            raise ValueError("Request body must be valid JSON.")
+            raise ValueError('Request body must be valid JSON.')
 
     def _extract_token(self, body: dict | None = None) -> str:
         body = body or {}
-        auth = self.headers.get(AUTH_HEADER, "")
-        if auth.lower().startswith("bearer "):
-            return auth.split(" ", 1)[1].strip()
-        return (self.headers.get(RUN_HEADER, "") or body.get("token", "") or "").strip()
+        auth = self.headers.get(AUTH_HEADER, '')
+        if auth.lower().startswith('bearer '):
+            return auth.split(' ', 1)[1].strip()
+        return (self.headers.get(RUN_HEADER, '') or body.get('token', '') or '').strip()
 
     def _authorize_read(self, body: dict | None = None) -> tuple[bool, str]:
-        configured = os.environ.get(READ_TOKEN_ENV, "").strip()
+        configured = os.getenv(READ_TOKEN_ENV, '').strip()
         supplied = self._extract_token(body)
         if configured:
             if supplied != configured:
-                return False, f"Missing or invalid bearer token for {READ_TOKEN_ENV}."
-            return True, ""
-        if SECURITY_STATE.get("issued_tokens"):
+                return False, f'Missing or invalid bearer token for {READ_TOKEN_ENV}.'
+            return True, ''
+        if SECURITY_STATE.get('issued_tokens'):
             if authenticate_token(SECURITY_STATE, supplied):
-                return True, ""
-            return False, "Missing or invalid paired-device bearer token."
-        return True, ""
+                return True, ''
+            return False, 'Missing or invalid paired-device bearer token.'
+        return True, ''
 
     def _authorize_manual_post(self, body: dict) -> tuple[bool, str]:
         allowed, message = self._authorize_read(body)
         if not allowed:
             return allowed, message
         if not self._is_private_or_loopback():
-            return False, "Manual updater POST is only allowed from loopback or private-network clients."
-        configured_token = os.environ.get(RUN_TOKEN_ENV, "").strip()
+            return False, 'Manual updater POST is only allowed from loopback or private-network clients.'
+        configured_token = os.getenv(RUN_TOKEN_ENV, '').strip()
         supplied_token = self._extract_token(body)
         if configured_token and supplied_token != configured_token and not authenticate_token(SECURITY_STATE, supplied_token):
-            return False, f"Missing or invalid {RUN_HEADER}."
+            return False, f'Missing or invalid {RUN_HEADER}.'
         try:
             if not configured_token and not supplied_token and not ipaddress.ip_address(self._client_ip()).is_loopback:
-                return False, f"Pair this device first or set {RUN_TOKEN_ENV} before allowing LAN-triggered manual runs."
+                return False, f'Pair this device first or set {RUN_TOKEN_ENV} before allowing LAN-triggered manual runs.'
         except ValueError:
-            return False, "Unable to validate client IP."
-        return True, ""
+            return False, 'Unable to validate client IP.'
+        return True, ''
 
     def do_OPTIONS(self):
-        self._send({"ok": True})
+        self._send({'ok': True})
 
     def do_GET(self):
-        path = self.path.rstrip("/") or "/"
-        if path == "/pairing/status":
+        path = self.path.rstrip('/') or '/'
+        if path == '/pairing/status':
             self._send(pairing_status_payload(SECURITY_STATE))
             return
         allowed, message = self._authorize_read()
         if not allowed:
-            self._send({"error": message}, status=401)
+            self._send({'error': message}, status=401)
             return
-        if path == "/status":
+        if path == '/status':
             self._send(status_payload())
             return
-        if path == "/log/main":
-            self._send({"name": "main", "content": read_text(MAIN_LOG, 400)})
+        if path == '/log/main':
+            self._send({'name': 'main', 'content': read_text(MAIN_LOG, 400)})
             return
-        if path == "/log/alert":
-            self._send({"name": "alert", "content": read_text(ALERT_LOG, 300)})
+        if path == '/log/alert':
+            self._send({'name': 'alert', 'content': read_text(ALERT_LOG, 300)})
             return
-        if path.startswith("/log/repo/"):
-            name = unquote(path.split("/log/repo/", 1)[1])
-            safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
-            file_path = REPO_LOG_DIR / f"{safe}.log"
-            self._send({"name": name, "content": read_text(file_path, 300)})
+        if path.startswith('/log/repo/'):
+            name = unquote(path.split('/log/repo/', 1)[1])
+            safe = re.sub(r'[^A-Za-z0-9._-]+', '_', name)
+            file_path = REPO_LOG_DIR / f'{safe}.log'
+            self._send({'name': name, 'content': read_text(file_path, 300)})
             return
-        self._send({"error": "not found"}, status=404)
+        self._send({'error': 'not found'}, status=404)
 
     def do_POST(self):
-        path = self.path.rstrip("/") or "/"
+        path = self.path.rstrip('/') or '/'
         try:
             body = self._read_json_body()
         except ValueError as exc:
-            self._send({"error": str(exc)}, status=400)
+            self._send({'error': str(exc)}, status=400)
             return
 
-        if path == "/pairing/exchange":
-            code = str(body.get("pairingCode", "")).strip().upper()
-            device_name = str(body.get("deviceName", "")).strip() or "iPhone"
+        if path == '/pairing/exchange':
+            code = str(body.get('pairingCode', '')).strip().upper()
+            device_name = str(body.get('deviceName', '')).strip() or 'iPhone'
             current = current_pairing_record(SECURITY_STATE)
             if not current:
-                self._send({"error": "No active pairing code is available. Restart the helper to generate a new code."}, status=409)
+                self._send({'error': 'No active pairing code is available. Restart the helper to generate a new code.'}, status=409)
                 return
-            if not verify_secret(code, SECURITY_STATE.get("pairing_code_salt", ""), SECURITY_STATE.get("pairing_code_hash", "")):
-                self._send({"error": "Invalid pairing code."}, status=403)
+            if not verify_secret(code, SECURITY_STATE.get('pairing_code_salt', ''), SECURITY_STATE.get('pairing_code_hash', '')):
+                self._send({'error': 'Invalid pairing code.'}, status=403)
                 return
-            payload = issue_token(SECURITY_STATE, device_name)
-            self._send(payload, status=201)
+            self._send(issue_token(SECURITY_STATE, device_name), status=201)
             return
 
-        if path != "/run-updater":
-            self._send({"error": "not found"}, status=404)
+        if path == '/devices/register':
+            allowed, message = self._authorize_read(body)
+            if not allowed:
+                self._send({'error': message}, status=401)
+                return
+            device_token = str(body.get('deviceToken', '')).strip()
+            device_name = str(body.get('deviceName', '')).strip() or 'iPhone'
+            platform = str(body.get('platform', 'ios')).strip() or 'ios'
+            if not device_token:
+                self._send({'error': 'Missing deviceToken.'}, status=400)
+                return
+            self._send({'ok': True, **register_device_token(SECURITY_STATE, device_token, device_name, platform)}, status=201)
+            return
+
+        if path != '/run-updater':
+            self._send({'error': 'not found'}, status=404)
             return
         allowed, message = self._authorize_manual_post(body)
         if not allowed:
-            self._send({"error": message}, status=403)
+            self._send({'error': message}, status=403)
             return
         if not SCRIPT_PATH.exists():
-            self._send({"error": f"Updater script not found: {SCRIPT_PATH}"}, status=500)
+            self._send({'error': f'Updater script not found: {SCRIPT_PATH}'}, status=500)
             return
         repo_targets = load_repo_targets()
         baseline = snapshot_repo_logs(repo_targets)
         action = {
-            "id": f"manual-{int(time.time())}",
-            "state": "queued",
-            "requestedAt": utc_now_iso(),
-            "startedAt": None,
-            "finishedAt": None,
-            "trigger": "manual-post",
-            "clientIP": self._client_ip(),
-            "pid": None,
-            "exitCode": None,
-            "statusMessage": "Manual updater run accepted.",
-            "latestSummary": latest_main_summary(),
-            "progress": {
-                "totalRepos": len(repo_targets),
-                "completedRepos": 0,
-                "percent": 0,
-                "touchedRepos": [],
-                "lastTouchedRepo": None,
-                "lastTouchedAt": None,
+            'id': f'manual-{int(time.time())}',
+            'state': 'queued',
+            'requestedAt': utc_now_iso(),
+            'startedAt': None,
+            'finishedAt': None,
+            'trigger': 'manual-post',
+            'clientIP': self._client_ip(),
+            'pid': None,
+            'exitCode': None,
+            'statusMessage': 'Manual updater run accepted.',
+            'latestSummary': latest_main_summary(),
+            'progress': {
+                'totalRepos': len(repo_targets),
+                'completedRepos': 0,
+                'percent': 0,
+                'touchedRepos': [],
+                'lastTouchedRepo': None,
+                'lastTouchedAt': None,
             },
         }
         with RUN_LOCK:
-            if RUN_STATE["current"]:
-                already_running = {"error": "Updater run already in progress.", "manualRun": get_run_state_snapshot()}
+            if RUN_STATE['current']:
+                already_running = {'error': 'Updater run already in progress.', 'manualRun': get_run_state_snapshot()}
             else:
-                RUN_STATE["current"] = clone_action(action)
-                RUN_STATE["history"] = [clone_action(action)] + [item for item in RUN_STATE["history"] if item.get("id") != action.get("id")]
-                RUN_STATE["history"] = RUN_STATE["history"][:MAX_ACTION_HISTORY]
+                RUN_STATE['current'] = clone_action(action)
+                RUN_STATE['history'] = [clone_action(action)] + [item for item in RUN_STATE['history'] if item.get('id') != action.get('id')]
+                RUN_STATE['history'] = RUN_STATE['history'][:MAX_ACTION_HISTORY]
                 already_running = None
         if already_running:
             self._send(already_running, status=409)
             return
         run_updater_in_background(action, repo_targets, baseline)
-        self._send({"ok": True, "manualRun": get_run_state_snapshot()}, status=202)
+        self._send({'ok': True, 'manualRun': get_run_state_snapshot()}, status=202)
 
     def log_message(self, format, *args):
         return
 
 
-if __name__ == "__main__":
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"Serving GitHub auto updater status on http://0.0.0.0:{PORT}")
-    print(f"Pairing status endpoint: GET http://127.0.0.1:{PORT}/pairing/status")
-    print(f"Pairing exchange endpoint: POST http://127.0.0.1:{PORT}/pairing/exchange")
-    print(f"Manual updater endpoint: POST http://127.0.0.1:{PORT}/run-updater")
-    print(f"Optional read token env var: {READ_TOKEN_ENV}")
-    print(f"Optional manual-run token env var: {RUN_TOKEN_ENV}")
-    print(f"Optional ntfy topic env var: {NTFY_TOPIC_ENV}")
-    print(f"Optional webhook env var: {WEBHOOK_URL_ENV}")
+if __name__ == '__main__':
+    start_bonjour_advertisement()
+    server = ThreadingHTTPServer(('0.0.0.0', PORT), Handler)
+    print(f'Serving GitHub auto updater status on http://0.0.0.0:{PORT}')
+    print(f'Bonjour service: {os.getenv(BONJOUR_SERVICE_NAME_ENV, "GitHub Auto Updater")} {BONJOUR_SERVICE_TYPE}.{BONJOUR_SERVICE_DOMAIN}:{PORT}')
+    print(f'Pairing status endpoint: GET http://127.0.0.1:{PORT}/pairing/status')
+    print(f'Pairing exchange endpoint: POST http://127.0.0.1:{PORT}/pairing/exchange')
+    print(f'Device registration endpoint: POST http://127.0.0.1:{PORT}/devices/register')
+    print(f'Manual updater endpoint: POST http://127.0.0.1:{PORT}/run-updater')
+    print(f'Optional read token env var: {READ_TOKEN_ENV}')
+    print(f'Optional manual-run token env var: {RUN_TOKEN_ENV}')
+    print(f'Optional ntfy topic env var: {NTFY_TOPIC_ENV}')
+    print(f'Optional webhook env var: {WEBHOOK_URL_ENV}')
+    print(f'Optional APNs env vars: {APNS_TEAM_ID_ENV}, {APNS_KEY_ID_ENV}, {APNS_KEY_PATH_ENV}, {APNS_TOPIC_ENV}')
     server.serve_forever()

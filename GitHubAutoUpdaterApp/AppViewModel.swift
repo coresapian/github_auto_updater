@@ -21,10 +21,7 @@ private enum HelperTokenKeychain {
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess,
               let data = item as? Data,
-              let token = String(data: data, encoding: .utf8)
-        else {
-            return ""
-        }
+              let token = String(data: data, encoding: .utf8) else { return "" }
         return token
     }
 
@@ -61,6 +58,7 @@ final class AppViewModel: ObservableObject {
     @AppStorage("deviceName") var deviceName: String = UIDevice.current.name
     @AppStorage("notificationsEnabled") var notificationsEnabled: Bool = false
     @AppStorage("lastNotifiedRunStamp") var lastNotifiedRunStamp: String = ""
+    @AppStorage("remoteNotificationsEnabled") var remoteNotificationsEnabled: Bool = false
 
     @Published var helperToken: String {
         didSet {
@@ -91,16 +89,16 @@ final class AppViewModel: ObservableObject {
     @Published var logSearchText: String = ""
     @Published var logSeverityFilter: LogSeverityFilter = .all
     @Published var dashboardRepoFilter: DashboardRepoFilter = .all
+    @Published var discoveredServers: [DiscoveredServer] = []
+    @Published var apnsDeviceToken: String = ""
 
     private let api = APIClient()
     private var autoRefreshTask: Task<Void, Never>?
     private var isAppActive = false
+    private let discovery = BonjourDiscoveryService()
 
     enum DashboardRepoFilter: String, CaseIterable, Identifiable {
-        case all
-        case needsAttention
-        case healthy
-
+        case all, needsAttention, healthy
         var id: String { rawValue }
         var title: String {
             switch self {
@@ -113,6 +111,17 @@ final class AppViewModel: ObservableObject {
 
     init() {
         helperToken = HelperTokenKeychain.readToken()
+        discovery.onUpdate = { [weak self] servers in
+            Task { @MainActor in self?.discoveredServers = servers }
+        }
+        NotificationCenter.default.addObserver(forName: .apnsDeviceTokenDidUpdate, object: nil, queue: .main) { [weak self] note in
+            guard let token = note.object as? String else { return }
+            self?.apnsDeviceToken = token
+            Task { await self?.registerCurrentDeviceForRemoteNotificationsIfPossible() }
+        }
+        NotificationCenter.default.addObserver(forName: .apnsRegistrationDidFail, object: nil, queue: .main) { [weak self] note in
+            if let msg = note.object as? String { self?.notificationMessage = msg }
+        }
     }
 
     var filteredRepos: [RepoStatus] {
@@ -139,12 +148,9 @@ final class AppViewModel: ObservableObject {
             let matchesQuery = query.isEmpty || line.normalized.contains(query)
             let matchesSeverity: Bool
             switch logSeverityFilter {
-            case .all:
-                matchesSeverity = true
-            case .matched:
-                matchesSeverity = !query.isEmpty && line.normalized.contains(query)
-            default:
-                matchesSeverity = line.severity == logSeverityFilter
+            case .all: matchesSeverity = true
+            case .matched: matchesSeverity = !query.isEmpty && line.normalized.contains(query)
+            default: matchesSeverity = line.severity == logSeverityFilter
             }
             return matchesQuery && matchesSeverity
         }
@@ -158,12 +164,15 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    var hasHelperToken: Bool {
-        !helperToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
+    var hasHelperToken: Bool { !helperToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     func start() {
+        discovery.start()
         restartAutoRefreshLoop()
+    }
+
+    func useDiscoveredServer(_ server: DiscoveredServer) {
+        serverURL = server.url
     }
 
     func restartAutoRefreshLoop() {
@@ -172,17 +181,9 @@ final class AppViewModel: ObservableObject {
             guard let self else { return }
             while !Task.isCancelled {
                 let interval = max(refreshInterval, 10)
-                await MainActor.run {
-                    self.nextAutomaticRefreshDate = self.autoRefreshWhileOpen ? Date().addingTimeInterval(interval) : nil
-                }
-                do {
-                    try await Task.sleep(for: .seconds(interval))
-                } catch {
-                    break
-                }
-                guard await MainActor.run(body: { self.autoRefreshWhileOpen && self.isAppActive }) else {
-                    continue
-                }
+                await MainActor.run { self.nextAutomaticRefreshDate = self.autoRefreshWhileOpen ? Date().addingTimeInterval(interval) : nil }
+                do { try await Task.sleep(for: .seconds(interval)) } catch { break }
+                guard await MainActor.run(body: { self.autoRefreshWhileOpen && self.isAppActive }) else { continue }
                 await self.refresh(reason: .automatic)
             }
         }
@@ -198,8 +199,7 @@ final class AppViewModel: ObservableObject {
             }
         case .background:
             Task { await scheduleBackgroundRefreshIfNeeded() }
-        default:
-            break
+        default: break
         }
     }
 
@@ -213,29 +213,20 @@ final class AppViewModel: ObservableObject {
             self.status = status
             self.pairingStatus = status.pairing
             await maybeScheduleFailureNotification(from: status)
-            if selectedRepo == nil {
-                selectedRepo = status.repos.first
-            } else if let selectedRepo {
-                self.selectedRepo = status.repos.first(where: { $0.id == selectedRepo.id }) ?? status.repos.first
-            }
+            if selectedRepo == nil { selectedRepo = status.repos.first }
+            else if let selectedRepo { self.selectedRepo = status.repos.first(where: { $0.id == selectedRepo.id }) ?? status.repos.first }
             async let main = api.fetchLog(baseURL: serverURL, kind: "main", authToken: helperToken)
             async let alert = api.fetchLog(baseURL: serverURL, kind: "alert", authToken: helperToken)
             let (mainLog, alertLog) = try await (main, alert)
             mainLogText = mainLog.content
             alertLogText = alertLog.content
-            if selectedLogSource == .repo || selectedRepo != nil {
-                await refreshSelectedRepoLog()
-            }
+            if selectedLogSource == .repo || selectedRepo != nil { await refreshSelectedRepoLog() }
             lastRefreshDate = Date()
             errorMessage = nil
-            if reason != .backgroundTask {
-                await scheduleBackgroundRefreshIfNeeded()
-            }
+            await registerCurrentDeviceForRemoteNotificationsIfPossible()
+            if reason != .backgroundTask { await scheduleBackgroundRefreshIfNeeded() }
         } catch {
-            do {
-                pairingStatus = try await api.fetchPairingStatus(baseURL: serverURL)
-            } catch {
-            }
+            do { pairingStatus = try await api.fetchPairingStatus(baseURL: serverURL) } catch {}
             errorMessage = error.localizedDescription
         }
     }
@@ -244,22 +235,14 @@ final class AppViewModel: ObservableObject {
         do {
             pairingStatus = try await api.fetchPairingStatus(baseURL: serverURL)
             errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        } catch { errorMessage = error.localizedDescription }
     }
 
     func pairCurrentDevice() async {
         let code = pairingCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         let device = deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !code.isEmpty else {
-            errorMessage = "Enter the pairing code shown by the Mac helper."
-            return
-        }
-        guard !device.isEmpty else {
-            errorMessage = "Enter a device name for this token."
-            return
-        }
+        guard !code.isEmpty else { errorMessage = "Enter the pairing code shown by the Mac helper."; return }
+        guard !device.isEmpty else { errorMessage = "Enter a device name for this token."; return }
         isPairing = true
         defer { isPairing = false }
         do {
@@ -269,9 +252,7 @@ final class AppViewModel: ObservableObject {
             pairingMessage = "Paired as \(response.deviceName). Token \(response.tokenPreview) saved to Keychain."
             errorMessage = nil
             await refresh(reason: .manual)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        } catch { errorMessage = error.localizedDescription }
     }
 
     func clearHelperToken() {
@@ -284,6 +265,24 @@ final class AppViewModel: ObservableObject {
             let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
             notificationsEnabled = granted
             notificationMessage = granted ? "Notifications enabled." : "Notification permission was not granted."
+        } catch { notificationMessage = error.localizedDescription }
+    }
+
+    func requestRemoteNotificationRegistration() async {
+        await requestNotificationPermission()
+        guard notificationsEnabled else { return }
+        remoteNotificationsEnabled = true
+        await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
+        notificationMessage = "Requested remote notification registration."
+    }
+
+    func registerCurrentDeviceForRemoteNotificationsIfPossible() async {
+        guard remoteNotificationsEnabled, hasHelperToken, !apnsDeviceToken.isEmpty else { return }
+        do {
+            let response = try await api.registerDevice(baseURL: serverURL, authToken: helperToken, deviceToken: apnsDeviceToken, deviceName: deviceName)
+            if let count = response.registeredDeviceCount {
+                notificationMessage = "Registered for remote notifications. Helper knows \(count) device(s)."
+            }
         } catch {
             notificationMessage = error.localizedDescription
         }
@@ -329,7 +328,8 @@ final class AppViewModel: ObservableObject {
                     helperTime: status.helperTime,
                     dashboard: status.dashboard,
                     pairing: pairingStatus,
-                    notifications: status.notifications
+                    notifications: status.notifications,
+                    discovery: status.discovery
                 )
             }
             manualRunMessage = response.manualRun?.latest?.statusMessage ?? "Manual updater run requested."
@@ -343,10 +343,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func refreshSelectedRepoLog() async {
-        guard let selectedRepo else {
-            repoLogText = "No repo selected."
-            return
-        }
+        guard let selectedRepo else { repoLogText = "No repo selected."; return }
         do {
             let response = try await api.fetchLog(baseURL: serverURL, kind: "repo", repo: selectedRepo.repo, authToken: helperToken)
             repoLogText = response.content
@@ -364,12 +361,8 @@ final class AppViewModel: ObservableObject {
 
     func selectLogSource(_ source: LogSource) {
         selectedLogSource = source
-        if source == .repo, selectedRepo == nil {
-            selectedRepo = status.repos.first
-        }
-        if source == .repo {
-            Task { await refreshSelectedRepoLog() }
-        }
+        if source == .repo, selectedRepo == nil { selectedRepo = status.repos.first }
+        if source == .repo { Task { await refreshSelectedRepoLog() } }
     }
 
     func performBackgroundRefresh() async {
@@ -382,19 +375,14 @@ final class AppViewModel: ObservableObject {
         guard backgroundRefreshEnabled else { return }
         let request = BGAppRefreshTaskRequest(identifier: Self.backgroundTaskIdentifier)
         request.earliestBeginDate = Date().addingTimeInterval(max(refreshInterval, 15) * 2)
-        do {
-            try BGTaskScheduler.shared.submit(request)
-        } catch {
-        }
+        do { try BGTaskScheduler.shared.submit(request) } catch {}
     }
 
     func formattedTimestamp(_ raw: String?) -> String {
         guard let raw, !raw.isEmpty else { return "—" }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
-        if let date = formatter.date(from: raw) {
-            return date.formatted(date: .abbreviated, time: .shortened)
-        }
+        if let date = formatter.date(from: raw) { return date.formatted(date: .abbreviated, time: .shortened) }
         return raw
     }
 
@@ -405,12 +393,8 @@ final class AppViewModel: ObservableObject {
 
     deinit {
         autoRefreshTask?.cancel()
+        discovery.stop()
     }
 }
 
-enum RefreshReason {
-    case manual
-    case automatic
-    case sceneBecameActive
-    case backgroundTask
-}
+enum RefreshReason { case manual, automatic, sceneBecameActive, backgroundTask }

@@ -101,3 +101,28 @@ Optional push notifications from the helper:
 - TestFlight checklist: `docs/TESTFLIGHT_CHECKLIST.md`
 - App review notes: `docs/APP_REVIEW_NOTES.md`
 - Before App Store submission, add a real App Icon set and finalize metadata/screenshots.
+
+
+Bonjour discovery:
+- The helper advertises itself over Bonjour as `_ghupdater._tcp` when `dns-sd` is available.
+- The iOS app Settings screen can list discovered helpers and fill in the server URL.
+
+Remote notifications:
+- The iOS app can request APNs registration and register its device token with the helper after pairing.
+- Optional helper APNs delivery env vars:
+  - `GITHUB_AUTO_UPDATER_APNS_TEAM_ID`
+  - `GITHUB_AUTO_UPDATER_APNS_KEY_ID`
+  - `GITHUB_AUTO_UPDATER_APNS_KEY_PATH`
+  - `GITHUB_AUTO_UPDATER_APNS_TOPIC`
+  - `GITHUB_AUTO_UPDATER_APNS_USE_SANDBOX=1` (default)
+- Optional device registration endpoint:
+  - `POST /devices/register`
+
+Real app icon:
+- An `AppIcon.appiconset` is included in `GitHubAutoUpdaterApp/Assets.xcassets/`.
+
+Archive workflow:
+- Scripted archive helper:
+  - `scripts/archive_testflight.sh`
+- Additional release notes:
+  - `docs/ARCHIVE_AND_UPLOAD_WORKFLOW.md`

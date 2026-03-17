@@ -65,18 +65,7 @@ struct DashboardSummary: Codable, Hashable {
     let alertLogPresent: Bool
     let latestRepoUpdate: Date?
 
-    static let placeholder = DashboardSummary(
-        totalRepos: 0,
-        healthyRepos: 0,
-        attentionRepos: 0,
-        failedRepos: 0,
-        warningRepos: 0,
-        skippedRepos: 0,
-        unknownRepos: 0,
-        backupsCount: 0,
-        alertLogPresent: false,
-        latestRepoUpdate: nil
-    )
+    static let placeholder = DashboardSummary(totalRepos: 0, healthyRepos: 0, attentionRepos: 0, failedRepos: 0, warningRepos: 0, skippedRepos: 0, unknownRepos: 0, backupsCount: 0, alertLogPresent: false, latestRepoUpdate: nil)
 }
 
 struct ManualRunProgress: Codable, Hashable {
@@ -87,14 +76,7 @@ struct ManualRunProgress: Codable, Hashable {
     let lastTouchedRepo: String?
     let lastTouchedAt: String?
 
-    static let empty = ManualRunProgress(
-        totalRepos: 0,
-        completedRepos: 0,
-        percent: 0,
-        touchedRepos: [],
-        lastTouchedRepo: nil,
-        lastTouchedAt: nil
-    )
+    static let empty = ManualRunProgress(totalRepos: 0, completedRepos: 0, percent: 0, touchedRepos: [], lastTouchedRepo: nil, lastTouchedAt: nil)
 }
 
 struct ManualRunAction: Codable, Identifiable, Hashable {
@@ -130,14 +112,7 @@ struct ManualRunState: Codable, Hashable {
     let postEndpoint: String
     let authHeader: String
 
-    static let empty = ManualRunState(
-        current: nil,
-        latest: nil,
-        history: [],
-        tokenConfigured: false,
-        postEndpoint: "/run-updater",
-        authHeader: "X-Updater-Token"
-    )
+    static let empty = ManualRunState(current: nil, latest: nil, history: [], tokenConfigured: false, postEndpoint: "/run-updater", authHeader: "X-Updater-Token")
 }
 
 struct PairingStatus: Codable, Hashable {
@@ -151,17 +126,7 @@ struct PairingStatus: Codable, Hashable {
     let activeTokenCount: Int
     let recommendedTransport: String
 
-    static let placeholder = PairingStatus(
-        authRequired: false,
-        authMode: "bearer-token",
-        helperInstanceID: "",
-        pairingAvailable: false,
-        pairingCodeLabel: nil,
-        pairingCodeExpiresAt: nil,
-        pairingInstructions: "Start the Mac helper to load pairing information.",
-        activeTokenCount: 0,
-        recommendedTransport: "local-network-only"
-    )
+    static let placeholder = PairingStatus(authRequired: false, authMode: "bearer-token", helperInstanceID: "", pairingAvailable: false, pairingCodeLabel: nil, pairingCodeExpiresAt: nil, pairingInstructions: "Start the Mac helper to load pairing information.", activeTokenCount: 0, recommendedTransport: "local-network-only")
 }
 
 struct PairingExchangeResponse: Codable, Hashable {
@@ -181,14 +146,18 @@ struct NotificationStatus: Codable, Hashable {
     let lastSentAt: String?
     let lastResult: String?
     let lastRunStamp: String?
+    let registeredDeviceCount: Int?
+    let apnsConfigured: Bool?
 
-    static let placeholder = NotificationStatus(
-        configured: false,
-        channels: [],
-        lastSentAt: nil,
-        lastResult: nil,
-        lastRunStamp: nil
-    )
+    static let placeholder = NotificationStatus(configured: false, channels: [], lastSentAt: nil, lastResult: nil, lastRunStamp: nil, registeredDeviceCount: 0, apnsConfigured: false)
+}
+
+struct DiscoveryStatus: Codable, Hashable {
+    let bonjourServiceName: String
+    let bonjourServiceType: String
+    let port: Int
+
+    static let placeholder = DiscoveryStatus(bonjourServiceName: "GitHub Auto Updater", bonjourServiceType: "_ghupdater._tcp", port: 8787)
 }
 
 struct StatusResponse: Codable {
@@ -207,55 +176,33 @@ struct StatusResponse: Codable {
     let dashboard: DashboardSummary
     let pairing: PairingStatus
     let notifications: NotificationStatus
+    let discovery: DiscoveryStatus
 
-    static let placeholder = StatusResponse(
-        cronInstalled: false,
-        cronEntry: "",
-        scriptPath: "",
-        mainLog: "",
-        alertLog: "",
-        repoLogDir: "",
-        backups: [],
-        repos: [],
-        crontab: "",
-        latestSummary: LatestSummary(runStamp: nil, summary: nil, counts: nil),
-        manualRun: .empty,
-        helperTime: nil,
-        dashboard: .placeholder,
-        pairing: .placeholder,
-        notifications: .placeholder
-    )
+    static let placeholder = StatusResponse(cronInstalled: false, cronEntry: "", scriptPath: "", mainLog: "", alertLog: "", repoLogDir: "", backups: [], repos: [], crontab: "", latestSummary: LatestSummary(runStamp: nil, summary: nil, counts: nil), manualRun: .empty, helperTime: nil, dashboard: .placeholder, pairing: .placeholder, notifications: .placeholder, discovery: .placeholder)
 }
 
-struct LogResponse: Codable {
+struct LogResponse: Codable { let name: String; let content: String }
+struct RunUpdaterResponse: Codable { let ok: Bool?; let error: String?; let manualRun: ManualRunState? }
+
+struct DeviceRegistrationResponse: Codable { let ok: Bool?; let registeredDeviceCount: Int?; let error: String? }
+
+struct DiscoveredServer: Identifiable, Hashable {
+    let id: String
     let name: String
-    let content: String
-}
-
-struct RunUpdaterResponse: Codable {
-    let ok: Bool?
-    let error: String?
-    let manualRun: ManualRunState?
+    let host: String
+    let port: Int
+    let url: String
 }
 
 enum LogSource: String, CaseIterable, Identifiable {
-    case main
-    case alert
-    case repo
-
+    case main, alert, repo
     var id: String { rawValue }
     var title: String { rawValue.capitalized }
 }
 
 enum LogSeverityFilter: String, CaseIterable, Identifiable {
-    case all
-    case info
-    case warning
-    case error
-    case matched
-
+    case all, info, warning, error, matched
     var id: String { rawValue }
-
     var title: String {
         switch self {
         case .all: return "All"
@@ -270,18 +217,12 @@ enum LogSeverityFilter: String, CaseIterable, Identifiable {
 struct LogLine: Identifiable, Hashable {
     let text: String
     let index: Int
-
     var id: Int { index }
     var normalized: String { text.lowercased() }
-
     var severity: LogSeverityFilter {
         let value = normalized
-        if value.contains("error") || value.contains("failed") || value.contains("fatal") {
-            return .error
-        }
-        if value.contains("warn") || value.contains("skip") || value.contains("stale") {
-            return .warning
-        }
+        if value.contains("error") || value.contains("failed") || value.contains("fatal") { return .error }
+        if value.contains("warn") || value.contains("skip") || value.contains("stale") { return .warning }
         return .info
     }
 }
