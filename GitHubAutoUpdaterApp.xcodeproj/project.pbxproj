@@ -11,6 +11,7 @@
 		0324B62841155F381F3763CE /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFA29F43D2C07FD5ECF9BED3 /* Models.swift */; };
 		39853975E1104A1024EB7CC2 /* GitHubAutoUpdaterApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38F70E60BFB760278C812657 /* GitHubAutoUpdaterApp.swift */; };
 		6581C9357A259B3651B36E61 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40712D8E62A36CB3B5422650 /* RootView.swift */; };
+		6B404C08A737394C5FC6487B /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 7DDEF7EDAE779A71D1569695 /* PrivacyInfo.xcprivacy */; };
 		879CD81690DEE1011548A7C2 /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7521FCD91ED4FF257888259E /* AppViewModel.swift */; };
 /* End PBXBuildFile section */
 
@@ -19,6 +20,7 @@
 		38F70E60BFB760278C812657 /* GitHubAutoUpdaterApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubAutoUpdaterApp.swift; sourceTree = "<group>"; };
 		40712D8E62A36CB3B5422650 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		7521FCD91ED4FF257888259E /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
+		7DDEF7EDAE779A71D1569695 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		B11B848ED78D876750EAFDB9 /* GitHubAutoUpdaterApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = GitHubAutoUpdaterApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		CFA29F43D2C07FD5ECF9BED3 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		EA21B7A03362B98F1D3C1BEA /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
@@ -41,6 +43,7 @@
 				38F70E60BFB760278C812657 /* GitHubAutoUpdaterApp.swift */,
 				2CF4CEA279AA36BB59743B98 /* Info.plist */,
 				CFA29F43D2C07FD5ECF9BED3 /* Models.swift */,
+				7DDEF7EDAE779A71D1569695 /* PrivacyInfo.xcprivacy */,
 				40712D8E62A36CB3B5422650 /* RootView.swift */,
 			);
 			path = GitHubAutoUpdaterApp;
@@ -62,6 +65,7 @@
 			buildConfigurationList = C3D0B79B02F20DB2BD387F4C /* Build configuration list for PBXNativeTarget "GitHubAutoUpdaterApp" */;
 			buildPhases = (
 				03EA3FE57BBCD95D27665B93 /* Sources */,
+				F2F4B8AC88816F0EC442E120 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -108,6 +112,17 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		F2F4B8AC88816F0EC442E120 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6B404C08A737394C5FC6487B /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		03EA3FE57BBCD95D27665B93 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -138,7 +153,7 @@
 				INFOPLIST_KEY_CFBundleShortVersionString = 0.1.0;
 				INFOPLIST_KEY_CFBundleVersion = 1;
 				INFOPLIST_KEY_LSRequiresIPhoneOS = YES;
-				INFOPLIST_KEY_NSAppTransportSecurity = "[\"NSAllowsArbitraryLoads\": true]";
+				INFOPLIST_KEY_NSAppTransportSecurity = "[\"NSAllowsLocalNetworking\": true]";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Access your Mac helper server on the local network to monitor updater status.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIBackgroundModes = (
@@ -302,7 +317,7 @@
 				INFOPLIST_KEY_CFBundleShortVersionString = 0.1.0;
 				INFOPLIST_KEY_CFBundleVersion = 1;
 				INFOPLIST_KEY_LSRequiresIPhoneOS = YES;
-				INFOPLIST_KEY_NSAppTransportSecurity = "[\"NSAllowsArbitraryLoads\": true]";
+				INFOPLIST_KEY_NSAppTransportSecurity = "[\"NSAllowsLocalNetworking\": true]";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Access your Mac helper server on the local network to monitor updater status.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIBackgroundModes = (
