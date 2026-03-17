@@ -1,5 +1,8 @@
 # GitHub Auto Updater iOS App
 
+[![CI](https://github.com/Data-based-eng/github_auto_updater/actions/workflows/ci.yml/badge.svg)](https://github.com/Data-based-eng/github_auto_updater/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Data-based-eng/github_auto_updater)](https://github.com/Data-based-eng/github_auto_updater/releases/tag/v0.1.0)
+
 This repo contains a real SwiftUI iOS app project plus a small Mac-side helper server.
 
 Why there is a helper server:
@@ -61,8 +64,6 @@ Notes:
 - This is a real iOS app scaffold, not a Tkinter wrapper.
 - Finder-opening and crontab-editing remain Mac-only operations, so those stay on the Mac helper side rather than the iPhone UI.
 - The helper supports optional env-based tokens, but pairing now provides app-specific bearer tokens for devices on your local network.
-
-- `GET /log/repo/<repo-name>`
 
 Manual run endpoint:
 - `POST /run-updater`
