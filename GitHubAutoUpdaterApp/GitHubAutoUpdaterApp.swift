@@ -11,6 +11,13 @@ struct GitHubAutoUpdaterApp: App {
                 .task {
                     await viewModel.refresh()
                 }
+                .task(id: viewModel.refreshInterval) {
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: .seconds(viewModel.refreshInterval))
+                        if Task.isCancelled { break }
+                        await viewModel.refresh()
+                    }
+                }
         }
     }
 }

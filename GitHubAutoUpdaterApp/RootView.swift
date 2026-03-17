@@ -40,7 +40,15 @@ struct DashboardView: View {
                     LabeledContent("Cron installed", value: viewModel.status.cronInstalled ? "Yes" : "No")
                     LabeledContent("Cron entry", value: viewModel.status.cronEntry)
                     LabeledContent("Script", value: viewModel.status.scriptPath)
+                    if let summary = viewModel.status.latestSummary.summary, !summary.isEmpty {
+                        LabeledContent("Last summary", value: summary)
+                    }
+                    if let counts = viewModel.status.latestSummary.counts {
+                        LabeledContent("Last counts", value: counts.compactDescription)
+                    }
                 }
+
+                ManualRunSection()
 
                 Section("Repositories") {
                     ForEach(viewModel.status.repos) { repo in
@@ -99,6 +107,125 @@ struct DashboardView: View {
             return .red
         case .unknown:
             return .gray
+        }
+    }
+}
+
+struct ManualRunSection: View {
+    @EnvironmentObject private var viewModel: AppViewModel
+
+    var body: some View {
+        Section("Manual run") {
+            Button {
+                Task { await viewModel.triggerManualRun() }
+            } label: {
+                HStack {
+                    if viewModel.isTriggeringManualRun {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Text(viewModel.isTriggeringManualRun ? "Requesting…" : "Run updater now")
+                }
+            }
+            .disabled(viewModel.isTriggeringManualRun || viewModel.status.manualRun.current != nil)
+
+            if let action = viewModel.status.manualRun.current ?? viewModel.status.manualRun.latest {
+                ManualRunActionCard(title: viewModel.status.manualRun.current == nil ? "Most recent action" : "Current action", action: action)
+            }
+
+            if let info = viewModel.manualRunMessage, !info.isEmpty {
+                Text(info)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !viewModel.status.manualRun.history.isEmpty {
+                ForEach(viewModel.status.manualRun.history.prefix(3)) { action in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(action.stateLabel)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(color(for: action))
+                            Spacer()
+                            Text(viewModel.formattedTimestamp(action.requestedAt))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(action.statusMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private func color(for action: ManualRunAction) -> Color {
+        switch action.state {
+        case "queued": return .orange
+        case "running": return .blue
+        case "succeeded": return .green
+        case "failed": return .red
+        default: return .gray
+        }
+    }
+}
+
+struct ManualRunActionCard: View {
+    @EnvironmentObject private var viewModel: AppViewModel
+    let title: String
+    let action: ManualRunAction
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+            HStack {
+                Text(action.stateLabel)
+                    .font(.headline)
+                    .foregroundStyle(color)
+                Spacer()
+                if action.progress.totalRepos > 0 {
+                    Text("\(action.progress.completedRepos)/\(action.progress.totalRepos)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if action.progress.totalRepos > 0 {
+                ProgressView(value: Double(action.progress.completedRepos), total: Double(action.progress.totalRepos))
+                Text("\(action.progress.percent)% complete")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let repo = action.progress.lastTouchedRepo {
+                LabeledContent("Last repo", value: repo)
+                    .font(.caption)
+            }
+            LabeledContent("Requested", value: viewModel.formattedTimestamp(action.requestedAt))
+            if let startedAt = action.startedAt {
+                LabeledContent("Started", value: viewModel.formattedTimestamp(startedAt))
+            }
+            if let finishedAt = action.finishedAt {
+                LabeledContent("Finished", value: viewModel.formattedTimestamp(finishedAt))
+            }
+            Text(action.statusMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let summary = action.latestSummary?.summary, !summary.isEmpty {
+                Text(summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var color: Color {
+        switch action.state {
+        case "queued": return .orange
+        case "running": return .blue
+        case "succeeded": return .green
+        case "failed": return .red
+        default: return .gray
         }
     }
 }
@@ -179,13 +306,22 @@ struct SettingsView: View {
                     TextField("Mac helper URL", text: $viewModel.serverURL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    Stepper(value: $viewModel.refreshInterval, in: 10...300, step: 5) {
+                    TextField("POST token (optional for localhost)", text: $viewModel.helperToken)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Stepper(value: $viewModel.refreshInterval, in: 10 ... 300, step: 5) {
                         Text("Refresh interval: \(Int(viewModel.refreshInterval))s")
                     }
                 }
 
+                Section("Manual run notes") {
+                    Text("Manual runs use POST /run-updater. Loopback requests work without a token, but LAN-triggered runs require the helper to be started with GITHUB_AUTO_UPDATER_HELPER_TOKEN and this same token entered here.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Mac-side capabilities") {
-                    Text("The iOS app reads updater status through the helper server. Cron editing and Finder actions remain Mac-side operations.")
+                    Text("The iOS app can now request a manual updater run through the helper server. Cron editing and Finder actions remain Mac-side operations.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
