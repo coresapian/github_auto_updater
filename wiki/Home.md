@@ -1,6 +1,6 @@
-# github_auto_updater Wiki
+# GitHub Auto Updater iOS App
 
-Welcome to the github_auto_updater documentation wiki.
+Welcome to the GitHub Auto Updater iOS App documentation wiki.
 
 ## Quick Links
 
@@ -12,11 +12,21 @@ Welcome to the github_auto_updater documentation wiki.
 
 ## Overview
 
-This wiki contains documentation for the github_auto_updater project.
+[![CI](https://github.com/Data-based-eng/github_auto_updater/actions/workflows/ci.yml/badge.svg)](https://github.com/Data-based-eng/github_auto_updater/actions/workflows/ci.yml)
 
-## Contributing
+## Project Type
+**Mobile Application** - iOS/Android mobile app.
 
-To contribute to this wiki, edit the markdown files in this directory.
+## Technology Stack
+
+- **Mobile**
+- **Web**
+
+## Repository
+
+- **Source Code:** [GitHub](https://github.com/coresapian/github_auto_updater)
+- **Documentation:** This Wiki
+- **Issues:** [GitHub Issues](https://github.com/coresapian/github_auto_updater/issues)
 
 ---
 *Last updated: 2026-03-22*

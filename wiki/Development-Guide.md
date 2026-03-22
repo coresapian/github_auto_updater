@@ -1,62 +1,83 @@
-# Development Guide
+# Development Guide for GitHub Auto Updater iOS App
 
-Guide for contributing to github_auto_updater.
+This guide covers contributing to and developing GitHub Auto Updater iOS App.
 
 ## Development Setup
 
+### Prerequisites
+
+- Check repository README for development requirements
+
+
+### Clone and Setup
+
 ```bash
 # Clone the repository
-git clone [repository-url]
+git clone https://github.com/coresapian/github_auto_updater.git
 cd github_auto_updater
 
 # Install dependencies
-npm install  # or pip install, etc.
+# Install using documented method
 
-# Start development server
-npm run dev  # or equivalent
-```
+### Running in Development
+
+Run the application using documented commands.
 
 ## Project Structure
 
 ```
 github_auto_updater/
-├── src/           # Source code
-├── tests/         # Test files
-├── docs/          # Documentation
-└── wiki/          # This wiki
+# Project structure - see README.md
 ```
 
 ## Coding Standards
 
-- Follow [language] conventions
-- Use meaningful variable names
-- Add comments for complex logic
-- Write tests for new features
+### Code Style
 
-## Testing
+- Follow language-specific best practices
 
-```bash
-# Run tests
-npm test  # or pytest, etc.
 
-# Run with coverage
-npm run test:coverage
+## Commit Guidelines
+
+Follow Conventional Commits specification:
+
 ```
+<type>(<scope>): <subject>
+
+<body>
+
+<footer>
+```
+
+**Types:** feat, fix, docs, style, refactor, test, chore
+**Examples:**
+- `feat: add user authentication`
+- `fix: resolve API timeout issue`
+- `docs: update installation guide`
+- `refactor: optimize database queries`
 
 ## Pull Request Process
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Write/update tests
-5. Submit a pull request
+1. **Fork** the repository on GitHub
+2. **Create** a feature branch from `main`
+3. **Make** your changes following the coding standards
+4. **Write** tests for new functionality
+5. **Update** documentation as needed
+6. **Commit** with clear commit messages
+7. **Push** to your fork
+8. **Create** pull request to `coresapian/main`
 
-## Build and Deploy
+## Code Review Checklist
 
-```bash
-# Build for production
-npm run build
+Before submitting a pull request, ensure:
 
-# Deploy
-npm run deploy
-```
+- [ ] Code follows style guidelines
+- [ ] Tests pass successfully
+- [ ] Documentation is updated
+- [ ] No merge conflicts
+- [ ] Self-review completed
+- [ ] Performance not degraded
+
+## Deployment
+
+See repository README for deployment instructions.
